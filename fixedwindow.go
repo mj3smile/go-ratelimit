@@ -44,7 +44,7 @@ func (fw *fixedWindow) AllowN(ctx context.Context, key string, n int64) (Result,
 	}
 
 	if fw.onResult != nil {
-		fw.onResult(key, result)
+		fw.onResult(ctx, key, result)
 	}
 
 	return result, nil

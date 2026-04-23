@@ -333,15 +333,18 @@ func TestFixedWindow_Reset(t *testing.T) {
 }
 
 func TestFixedWindow_OnResult(t *testing.T) {
-	ctx := context.Background()
+	type ctxKey struct{}
+	ctx := context.WithValue(context.Background(), ctxKey{}, "trace-123")
 
 	var calls []Result
 	var keys []string
+	var gotTraces []any
 	limiter := New(
 		WithRate(2, time.Minute),
-		WithOnResult(func(key string, result Result) {
+		WithOnResult(func(cbCtx context.Context, key string, result Result) {
 			calls = append(calls, result)
 			keys = append(keys, key)
+			gotTraces = append(gotTraces, cbCtx.Value(ctxKey{}))
 		}),
 	)
 
@@ -361,6 +364,11 @@ func TestFixedWindow_OnResult(t *testing.T) {
 	for i, k := range keys {
 		if k != "key" {
 			t.Errorf("call %d: key = %q, want %q", i, k, "key")
+		}
+	}
+	for i, v := range gotTraces {
+		if v != "trace-123" {
+			t.Errorf("call %d: ctx value = %v, want %q", i, v, "trace-123")
 		}
 	}
 }

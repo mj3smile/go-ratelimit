@@ -79,9 +79,12 @@ type Store interface {
 	Reset(ctx context.Context, key string) error
 }
 
-// OnResultFunc is called after every rate limit check with the key and result.
-// Use this for metrics, logging, or monitoring.
-type OnResultFunc func(key string, result Result)
+// OnResultFunc is called after every rate limit check with the request context,
+// key, and result. Use this for metrics, logging, or monitoring.
+//
+// The context is the same one passed to Allow/AllowN, allowing the callback to
+// read request-scoped values (trace IDs, tenant IDs) or attach tracing spans.
+type OnResultFunc func(ctx context.Context, key string, result Result)
 
 // Option configures a limiter.
 type Option func(*config)
@@ -116,6 +119,18 @@ func WithRate(rate int64, period time.Duration) Option {
 		c.window = Window{Rate: rate, Period: period}
 	}
 }
+
+// PerSecond is shorthand for WithRate(n, time.Second).
+func PerSecond(n int64) Option { return WithRate(n, time.Second) }
+
+// PerMinute is shorthand for WithRate(n, time.Minute).
+func PerMinute(n int64) Option { return WithRate(n, time.Minute) }
+
+// PerHour is shorthand for WithRate(n, time.Hour).
+func PerHour(n int64) Option { return WithRate(n, time.Hour) }
+
+// PerDay is shorthand for WithRate(n, 24*time.Hour).
+func PerDay(n int64) Option { return WithRate(n, 24*time.Hour) }
 
 // WithRateString sets the rate from a formatted string.
 // The format is "<count>-<unit>" where unit is one of:
