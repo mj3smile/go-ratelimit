@@ -75,6 +75,25 @@ type Store interface {
 	// otherwise unchanged) and whether the increment was applied.
 	CheckAndIncrement(ctx context.Context, key string, window Window, n int64) (count int64, applied bool, err error)
 
+	// CheckAndIncrementSliding atomically applies a 2-bucket sliding window
+	// check for the given key. It maintains two consecutive buckets of size
+	// window.Period: a current bucket (in progress) and a previous bucket
+	// (just completed).
+	//
+	// The check uses a weighted estimate of requests in the trailing
+	// window.Period:
+	//
+	//	weight   = (window.Period - elapsed) / window.Period
+	//	estimate = prev*weight + curr
+	//
+	// If estimate+n <= window.Rate, the increment is applied to the current
+	// bucket and applied=true. Otherwise applied=false and no state changes.
+	//
+	// curr and prev reflect state after any bucket rotation and after the
+	// increment (if applied). elapsed is how far into the current bucket the
+	// operation occurred (0 <= elapsed < window.Period).
+	CheckAndIncrementSliding(ctx context.Context, key string, window Window, n int64) (curr, prev int64, elapsed time.Duration, applied bool, err error)
+
 	// Reset removes the rate limit state for the given key.
 	Reset(ctx context.Context, key string) error
 }
@@ -215,7 +234,7 @@ func New(opts ...Option) Limiter {
 	case FixedWindow:
 		return newFixedWindow(cfg.window, cfg.store, cfg.onResult)
 	case SlidingWindow:
-		panic("ratelimit: SlidingWindow algorithm is not yet implemented")
+		return newSlidingWindow(cfg.window, cfg.store, cfg.onResult)
 	case TokenBucket:
 		panic("ratelimit: TokenBucket algorithm is not yet implemented")
 	case LeakyBucket:
