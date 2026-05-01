@@ -94,6 +94,24 @@ type Store interface {
 	// operation occurred (0 <= elapsed < window.Period).
 	CheckAndIncrementSliding(ctx context.Context, key string, window Window, n int64) (curr, prev int64, elapsed time.Duration, applied bool, err error)
 
+	// CheckAndConsumeTokens atomically applies a token-bucket check for the
+	// given key. The bucket has capacity tokens and refills at window.Rate
+	// tokens per window.Period. If at least n tokens are available after
+	// refill, n are consumed and applied=true. Otherwise applied=false and
+	// only the refill is applied (no tokens consumed).
+	//
+	// tokens reflects the post-state token count. sinceLastRefill is the time
+	// elapsed since the last credited refill — always less than the emission
+	// interval, where the emission interval is the duration needed to
+	// produce one token (window.Period / window.Rate). The caller can use it
+	// to compute retry-after as:
+	// (n-tokens)*emissionInterval - sinceLastRefill.
+	//
+	// State uses a "lazy advance" approach: lastRefill is only moved forward
+	// by integer multiples of the emission interval, preserving fractional
+	// refill credit between calls.
+	CheckAndConsumeTokens(ctx context.Context, key string, capacity int64, window Window, n int64) (tokens int64, sinceLastRefill time.Duration, applied bool, err error)
+
 	// Reset removes the rate limit state for the given key.
 	Reset(ctx context.Context, key string) error
 }
@@ -111,6 +129,7 @@ type Option func(*config)
 type config struct {
 	algorithm Algorithm
 	window    Window
+	burst     int64
 	store     Store
 	onResult  OnResultFunc
 }
@@ -200,6 +219,17 @@ func ParseRateString(rate string) Window {
 	return Window{Rate: count, Period: period}
 }
 
+// WithBurst sets the token-bucket burst capacity. Only meaningful for the
+// TokenBucket algorithm; ignored otherwise.
+//
+// If unset (or 0), burst defaults to window.Rate, meaning the bucket can hold
+// at most one full period's worth of tokens.
+func WithBurst(burst int64) Option {
+	return func(c *config) {
+		c.burst = burst
+	}
+}
+
 // WithStore sets the storage backend.
 func WithStore(store Store) Option {
 	return func(c *config) {
@@ -236,7 +266,11 @@ func New(opts ...Option) Limiter {
 	case SlidingWindow:
 		return newSlidingWindow(cfg.window, cfg.store, cfg.onResult)
 	case TokenBucket:
-		panic("ratelimit: TokenBucket algorithm is not yet implemented")
+		burst := cfg.burst
+		if burst == 0 {
+			burst = cfg.window.Rate
+		}
+		return newTokenBucket(cfg.window, burst, cfg.store, cfg.onResult)
 	case LeakyBucket:
 		panic("ratelimit: LeakyBucket algorithm is not yet implemented")
 	default:

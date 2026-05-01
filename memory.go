@@ -17,6 +17,11 @@ type slidingEntry struct {
 	currStart time.Time
 }
 
+type tokenEntry struct {
+	tokens     int64
+	lastRefill time.Time
+}
+
 // MemoryStore is an in-memory Store implementation.
 // It is safe for concurrent use and suitable for single-instance deployments
 // or testing.
@@ -24,6 +29,7 @@ type MemoryStore struct {
 	mu      sync.Mutex
 	entries map[string]*entry
 	sliding map[string]*slidingEntry
+	tokens  map[string]*tokenEntry
 	now     func() time.Time // for testing
 }
 
@@ -32,6 +38,7 @@ func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
 		entries: make(map[string]*entry),
 		sliding: make(map[string]*slidingEntry),
+		tokens:  make(map[string]*tokenEntry),
 		now:     time.Now,
 	}
 }
@@ -106,6 +113,48 @@ func (s *MemoryStore) CheckAndIncrementSliding(ctx context.Context, key string, 
 	return e.curr, e.prev, elapsed, true, nil
 }
 
+// CheckAndConsumeTokens atomically applies a token-bucket check for the given
+// key. See Store.CheckAndConsumeTokens for semantics.
+func (s *MemoryStore) CheckAndConsumeTokens(ctx context.Context, key string, capacity int64, window Window, n int64) (int64, time.Duration, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := s.now()
+	emissionInterval := window.Period / time.Duration(window.Rate)
+
+	e, ok := s.tokens[key]
+	if !ok {
+		// Initial state: bucket starts full at capacity.
+		if n > capacity {
+			return capacity, 0, false, nil
+		}
+		s.tokens[key] = &tokenEntry{
+			tokens:     capacity - n,
+			lastRefill: now,
+		}
+		return capacity - n, 0, true, nil
+	}
+
+	// Lazy advance: credit only complete emission intervals; carry the
+	// fractional remainder forward by leaving lastRefill behind.
+	elapsed := now.Sub(e.lastRefill)
+	refilled := int64(elapsed / emissionInterval)
+	e.tokens += refilled
+	if e.tokens > capacity {
+		e.tokens = capacity
+	}
+	e.lastRefill = e.lastRefill.Add(time.Duration(refilled) * emissionInterval)
+
+	applied := false
+	if e.tokens >= n {
+		e.tokens -= n
+		applied = true
+	}
+
+	sinceLastRefill := now.Sub(e.lastRefill)
+	return e.tokens, sinceLastRefill, applied, nil
+}
+
 // Reset removes the rate limit state for the given key.
 func (s *MemoryStore) Reset(ctx context.Context, key string) error {
 	s.mu.Lock()
@@ -113,5 +162,6 @@ func (s *MemoryStore) Reset(ctx context.Context, key string) error {
 
 	delete(s.entries, key)
 	delete(s.sliding, key)
+	delete(s.tokens, key)
 	return nil
 }
