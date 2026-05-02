@@ -427,3 +427,120 @@ func TestMemoryStore_CheckAndConsumeTokens_ConcurrentAccess(t *testing.T) {
 		t.Error("expected denial after capacity reached")
 	}
 }
+
+func TestMemoryStore_CheckAndAdvanceTAT(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	// rate=10/min → emission=6s. burst=10 → tolerance=60s.
+	window := Window{Rate: 10, Period: time.Minute}
+
+	// Fresh key: delay = 3*6s = 18s ≤ 60s → allowed.
+	delay, applied, err := store.CheckAndAdvanceTAT(ctx, "k", 10, window, 3)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if !applied {
+		t.Error("expected applied")
+	}
+	if delay != 18*time.Second {
+		t.Errorf("delay = %v, want 18s", delay)
+	}
+
+	// Same key: TAT is 18s ahead. newTAT = TAT + 8*6s = TAT+48s.
+	// delay = 18s + 48s = 66s > 60s → denied.
+	delay, applied, _ = store.CheckAndAdvanceTAT(ctx, "k", 10, window, 8)
+	if applied {
+		t.Error("3+8=11 > burst=10, expected denied")
+	}
+	if delay != 66*time.Second {
+		t.Errorf("delay = %v, want 66s", delay)
+	}
+
+	// Smaller request: TAT still 18s ahead. newTAT = TAT + 5*6s = TAT+30s.
+	// delay = 18s + 30s = 48s ≤ 60s → allowed.
+	delay, applied, _ = store.CheckAndAdvanceTAT(ctx, "k", 10, window, 5)
+	if !applied {
+		t.Error("3+5=8 ≤ burst=10, expected allowed")
+	}
+	if delay != 48*time.Second {
+		t.Errorf("delay = %v, want 48s", delay)
+	}
+}
+
+func TestMemoryStore_CheckAndAdvanceTAT_IdleRecovery(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	// rate=1/10s → emission=10s. burst=3 → tolerance=30s.
+	window := Window{Rate: 1, Period: 10 * time.Second}
+
+	// Drain: 3 requests → TAT = now + 30s.
+	store.CheckAndAdvanceTAT(ctx, "k", 3, window, 3)
+
+	// t=15s: TAT = original_now+30s, now = original_now+15s.
+	// TAT > now, so base = TAT. newTAT = TAT + 10s = original_now+40s.
+	// delay = 40s - 15s = 25s ≤ 30s → allowed.
+	now = now.Add(15 * time.Second)
+	delay, applied, _ := store.CheckAndAdvanceTAT(ctx, "k", 3, window, 1)
+	if !applied {
+		t.Error("after 15s idle, 1 request should fit")
+	}
+	if delay != 25*time.Second {
+		t.Errorf("delay = %v, want 25s", delay)
+	}
+
+	// t=60s (well past original TAT): now > tat, so base = now.
+	// delay = 10s ≤ 30s → allowed, and remaining ≈ burst-1.
+	now = now.Add(45 * time.Second)
+	delay, applied, _ = store.CheckAndAdvanceTAT(ctx, "k", 3, window, 1)
+	if !applied {
+		t.Error("after full idle, should be allowed")
+	}
+	if delay != 10*time.Second {
+		t.Errorf("delay = %v, want 10s (fresh start, 1*emission)", delay)
+	}
+}
+
+func TestMemoryStore_CheckAndAdvanceTAT_ConcurrentAccess(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+
+	const goroutines = 50
+	const perGoroutine = 20
+	total := int64(goroutines * perGoroutine)
+	window := Window{Rate: total, Period: time.Minute}
+
+	done := make(chan struct{})
+	applied := make(chan bool, goroutines*perGoroutine)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			for j := 0; j < perGoroutine; j++ {
+				_, ok, _ := store.CheckAndAdvanceTAT(ctx, "k", total, window, 1)
+				applied <- ok
+			}
+			done <- struct{}{}
+		}()
+	}
+	for i := 0; i < goroutines; i++ {
+		<-done
+	}
+	close(applied)
+
+	var count int64
+	for ok := range applied {
+		if ok {
+			count++
+		}
+	}
+	if count != total {
+		t.Errorf("applied count = %d, want %d (race in CheckAndAdvanceTAT)", count, total)
+	}
+
+	_, ok, _ := store.CheckAndAdvanceTAT(ctx, "k", total, window, 1)
+	if ok {
+		t.Error("expected denial after burst exhausted")
+	}
+}

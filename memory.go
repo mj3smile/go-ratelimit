@@ -22,6 +22,10 @@ type tokenEntry struct {
 	lastRefill time.Time
 }
 
+type gcraEntry struct {
+	tat time.Time
+}
+
 // MemoryStore is an in-memory Store implementation.
 // It is safe for concurrent use and suitable for single-instance deployments
 // or testing.
@@ -30,6 +34,7 @@ type MemoryStore struct {
 	entries map[string]*entry
 	sliding map[string]*slidingEntry
 	tokens  map[string]*tokenEntry
+	gcra    map[string]*gcraEntry
 	now     func() time.Time // for testing
 }
 
@@ -39,6 +44,7 @@ func NewMemoryStore() *MemoryStore {
 		entries: make(map[string]*entry),
 		sliding: make(map[string]*slidingEntry),
 		tokens:  make(map[string]*tokenEntry),
+		gcra:    make(map[string]*gcraEntry),
 		now:     time.Now,
 	}
 }
@@ -155,6 +161,37 @@ func (s *MemoryStore) CheckAndConsumeTokens(ctx context.Context, key string, cap
 	return e.tokens, sinceLastRefill, applied, nil
 }
 
+// CheckAndAdvanceTAT atomically applies a GCRA check for the given key.
+// See Store.CheckAndAdvanceTAT for semantics.
+func (s *MemoryStore) CheckAndAdvanceTAT(ctx context.Context, key string, burst int64, window Window, n int64) (time.Duration, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := s.now()
+	emissionInterval := window.Period / time.Duration(window.Rate)
+	delayTolerance := time.Duration(burst) * emissionInterval
+
+	tat := now
+	e, ok := s.gcra[key]
+	if ok && e.tat.After(now) {
+		tat = e.tat
+	}
+
+	newTAT := tat.Add(time.Duration(n) * emissionInterval)
+	delay := newTAT.Sub(now)
+
+	if delay > delayTolerance {
+		return delay, false, nil
+	}
+
+	if !ok {
+		s.gcra[key] = &gcraEntry{tat: newTAT}
+	} else {
+		e.tat = newTAT
+	}
+	return delay, true, nil
+}
+
 // Reset removes the rate limit state for the given key.
 func (s *MemoryStore) Reset(ctx context.Context, key string) error {
 	s.mu.Lock()
@@ -163,5 +200,6 @@ func (s *MemoryStore) Reset(ctx context.Context, key string) error {
 	delete(s.entries, key)
 	delete(s.sliding, key)
 	delete(s.tokens, key)
+	delete(s.gcra, key)
 	return nil
 }

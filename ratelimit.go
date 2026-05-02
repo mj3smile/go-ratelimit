@@ -23,8 +23,12 @@ const (
 	// a steady average rate.
 	TokenBucket
 
-	// LeakyBucket processes requests at a fixed rate, queuing or rejecting
-	// excess requests that arrive faster than the drain rate.
+	// LeakyBucket implements leaky-bucket-as-meter semantics using GCRA
+	// (Generic Cell Rate Algorithm). The bucket has a burst tolerance and
+	// drains at a steady rate; requests that would exceed the tolerance are
+	// denied. Behaviorally equivalent to TokenBucket with the same parameters,
+	// but with single-field state (one TAT timestamp instead of token count +
+	// lastRefill).
 	LeakyBucket
 )
 
@@ -111,6 +115,24 @@ type Store interface {
 	// by integer multiples of the emission interval, preserving fractional
 	// refill credit between calls.
 	CheckAndConsumeTokens(ctx context.Context, key string, capacity int64, window Window, n int64) (tokens int64, sinceLastRefill time.Duration, applied bool, err error)
+
+	// CheckAndAdvanceTAT atomically applies a GCRA (Generic Cell Rate
+	// Algorithm) check for the given key. It maintains a single TAT
+	// (Theoretical Arrival Time) per key.
+	//
+	// The update rule:
+	//
+	//	emissionInterval = window.Period / window.Rate
+	//	delayTolerance   = burst * emissionInterval
+	//	newTAT           = max(now, tat) + n * emissionInterval
+	//	delay            = newTAT - now
+	//
+	// If delay > delayTolerance, the request is denied and the TAT is
+	// unchanged. Otherwise the TAT advances to newTAT and applied=true.
+	//
+	// delay is always returned (even on deny) so the caller can compute
+	// Remaining (when allowed) or RetryAfter (when denied).
+	CheckAndAdvanceTAT(ctx context.Context, key string, burst int64, window Window, n int64) (delay time.Duration, applied bool, err error)
 
 	// Reset removes the rate limit state for the given key.
 	Reset(ctx context.Context, key string) error
@@ -219,8 +241,8 @@ func ParseRateString(rate string) Window {
 	return Window{Rate: count, Period: period}
 }
 
-// WithBurst sets the token-bucket burst capacity. Only meaningful for the
-// TokenBucket algorithm; ignored otherwise.
+// WithBurst sets the burst capacity for token-based algorithms
+// (TokenBucket, LeakyBucket). Ignored by window-based algorithms.
 //
 // If unset (or 0), burst defaults to window.Rate, meaning the bucket can hold
 // at most one full period's worth of tokens.
@@ -272,7 +294,11 @@ func New(opts ...Option) Limiter {
 		}
 		return newTokenBucket(cfg.window, burst, cfg.store, cfg.onResult)
 	case LeakyBucket:
-		panic("ratelimit: LeakyBucket algorithm is not yet implemented")
+		burst := cfg.burst
+		if burst == 0 {
+			burst = cfg.window.Rate
+		}
+		return newLeakyBucket(cfg.window, burst, cfg.store, cfg.onResult)
 	default:
 		panic(fmt.Sprintf("ratelimit: unknown algorithm: %d", cfg.algorithm))
 	}

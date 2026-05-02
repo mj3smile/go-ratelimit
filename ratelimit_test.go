@@ -31,15 +31,6 @@ func TestNew_WithRateString(t *testing.T) {
 	}
 }
 
-func TestNew_PanicsOnUnimplementedAlgorithm(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("expected panic for unimplemented algorithm")
-		}
-	}()
-	New(WithAlgorithm(LeakyBucket))
-}
-
 func TestNew_PanicsOnUnknownAlgorithm(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {
