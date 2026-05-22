@@ -544,3 +544,137 @@ func TestMemoryStore_CheckAndAdvanceTAT_ConcurrentAccess(t *testing.T) {
 		t.Error("expected denial after burst exhausted")
 	}
 }
+
+func TestMemoryStore_Expiry(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore(WithSweepInterval(0))
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	window := Window{Rate: 10, Period: time.Minute}
+
+	store.CheckAndIncrement(ctx, "fw", window, 1)
+	store.CheckAndIncrementSliding(ctx, "sw", window, 1)
+	store.CheckAndConsumeTokens(ctx, "tb", 10, window, 1)
+	store.CheckAndAdvanceTAT(ctx, "gcra", 10, window, 1)
+
+	if store.eh.Len() != 4 {
+		t.Fatalf("heap len = %d, want 4", store.eh.Len())
+	}
+
+	// Advance past the longest TTL (sliding window's 2 * period).
+	now = now.Add(3 * time.Minute)
+	store.deleteExpired()
+
+	if store.eh.Len() != 0 {
+		t.Errorf("heap len after expiry = %d, want 0", store.eh.Len())
+	}
+	if len(store.entries) != 0 {
+		t.Errorf("entries map len = %d, want 0", len(store.entries))
+	}
+	if len(store.sliding) != 0 {
+		t.Errorf("sliding map len = %d, want 0", len(store.sliding))
+	}
+	if len(store.tokens) != 0 {
+		t.Errorf("tokens map len = %d, want 0", len(store.tokens))
+	}
+	if len(store.gcra) != 0 {
+		t.Errorf("gcra map len = %d, want 0", len(store.gcra))
+	}
+}
+
+func TestMemoryStore_Expiry_TouchRefreshes(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore(WithSweepInterval(0))
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	window := Window{Rate: 2, Period: time.Minute} // emission interval = 30s
+
+	store.CheckAndIncrement(ctx, "fw", window, 1)
+	store.CheckAndIncrementSliding(ctx, "sw", window, 1)
+	store.CheckAndConsumeTokens(ctx, "tb", 2, window, 2)
+	store.CheckAndAdvanceTAT(ctx, "gcra", 2, window, 2)
+
+	// Re-access at t=45s refreshes the rolling algorithms' TTL but not fixed
+	// window's (its boundary at t=1m is fixed).
+	now = now.Add(45 * time.Second)
+	store.CheckAndIncrement(ctx, "fw", window, 1)
+	store.CheckAndIncrementSliding(ctx, "sw", window, 1)
+	store.CheckAndConsumeTokens(ctx, "tb", 2, window, 1)
+	store.CheckAndAdvanceTAT(ctx, "gcra", 2, window, 1)
+
+	// At t=1m15s only fixed window has expired.
+	now = now.Add(30 * time.Second)
+	store.deleteExpired()
+
+	if len(store.entries) != 0 {
+		t.Errorf("entries map len = %d, want 0 (fixed window TTL is not refreshed)", len(store.entries))
+	}
+	if len(store.sliding) != 1 {
+		t.Errorf("sliding map len = %d, want 1 (refreshed on access)", len(store.sliding))
+	}
+	if len(store.tokens) != 1 {
+		t.Errorf("tokens map len = %d, want 1 (refreshed on access)", len(store.tokens))
+	}
+	if len(store.gcra) != 1 {
+		t.Errorf("gcra map len = %d, want 1 (refreshed on access)", len(store.gcra))
+	}
+
+	now = now.Add(3 * time.Minute)
+	store.deleteExpired()
+
+	if len(store.sliding) != 0 {
+		t.Errorf("sliding map len = %d, want 0 (expired)", len(store.sliding))
+	}
+	if len(store.tokens) != 0 {
+		t.Errorf("tokens map len = %d, want 0 (expired)", len(store.tokens))
+	}
+	if len(store.gcra) != 0 {
+		t.Errorf("gcra map len = %d, want 0 (expired)", len(store.gcra))
+	}
+}
+
+func TestMemoryStore_Expiry_ResetCleansHeap(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore(WithSweepInterval(0))
+	window := Window{Rate: 10, Period: time.Minute}
+
+	store.CheckAndIncrement(ctx, "k", window, 1)
+	if store.eh.Len() != 1 {
+		t.Fatalf("heap len = %d, want 1", store.eh.Len())
+	}
+
+	store.Reset(ctx, "k")
+	if store.eh.Len() != 0 {
+		t.Errorf("heap len after reset = %d, want 0", store.eh.Len())
+	}
+	if len(store.lookup) != 0 {
+		t.Errorf("lookup len after reset = %d, want 0", len(store.lookup))
+	}
+}
+
+func TestMemoryStore_Expiry_OnlyExpiredRemoved(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore(WithSweepInterval(0))
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+
+	shortWindow := Window{Rate: 10, Period: 30 * time.Second}
+	longWindow := Window{Rate: 10, Period: 5 * time.Minute}
+
+	store.CheckAndIncrement(ctx, "short", shortWindow, 1)
+	store.CheckAndIncrement(ctx, "long", longWindow, 1)
+
+	// Advance 2m — past short's TTL (60s) but before long's TTL (10m).
+	now = now.Add(2 * time.Minute)
+	store.deleteExpired()
+
+	if len(store.entries) != 1 {
+		t.Errorf("entries map len = %d, want 1", len(store.entries))
+	}
+	if _, ok := store.entries["long"]; !ok {
+		t.Error("long-window key should survive")
+	}
+	if _, ok := store.entries["short"]; ok {
+		t.Error("short-window key should be expired")
+	}
+}

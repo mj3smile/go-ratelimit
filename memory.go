@@ -1,6 +1,7 @@
 package ratelimit
 
 import (
+	"container/heap"
 	"context"
 	"sync"
 	"time"
@@ -29,6 +30,10 @@ type gcraEntry struct {
 // MemoryStore is an in-memory Store implementation.
 // It is safe for concurrent use and suitable for single-instance deployments
 // or testing.
+//
+// Expired keys are cleaned up by a background goroutine using a min-heap,
+// so only actually-expired keys are touched on each sweep (no full-map scan).
+// Call Close to stop the goroutine when the store is no longer needed.
 type MemoryStore struct {
 	mu      sync.Mutex
 	entries map[string]*entry
@@ -36,16 +41,109 @@ type MemoryStore struct {
 	tokens  map[string]*tokenEntry
 	gcra    map[string]*gcraEntry
 	now     func() time.Time // for testing
+
+	eh        expiryHeap
+	lookup    map[heapKey]*heapItem
+	stopCh    chan struct{}
+	closeOnce sync.Once
 }
 
-// NewMemoryStore creates a new in-memory store.
-func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{
+// MemoryStoreOption configures a MemoryStore.
+type MemoryStoreOption func(*memoryStoreConfig)
+
+type memoryStoreConfig struct {
+	sweepInterval time.Duration
+}
+
+// WithSweepInterval sets how often the background goroutine checks for
+// expired keys. Default is 1 minute. Set to 0 to disable the background
+// sweep (useful for testing with manual deleteExpired calls).
+func WithSweepInterval(d time.Duration) MemoryStoreOption {
+	return func(c *memoryStoreConfig) {
+		c.sweepInterval = d
+	}
+}
+
+// NewMemoryStore creates a new in-memory store with a background goroutine
+// that cleans up expired keys. Call Close to stop the goroutine.
+func NewMemoryStore(opts ...MemoryStoreOption) *MemoryStore {
+	cfg := memoryStoreConfig{sweepInterval: time.Minute}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
+	s := &MemoryStore{
 		entries: make(map[string]*entry),
 		sliding: make(map[string]*slidingEntry),
 		tokens:  make(map[string]*tokenEntry),
 		gcra:    make(map[string]*gcraEntry),
+		eh:      make(expiryHeap, 0),
+		lookup:  make(map[heapKey]*heapItem),
+		stopCh:  make(chan struct{}),
 		now:     time.Now,
+	}
+	if cfg.sweepInterval > 0 {
+		go s.sweep(cfg.sweepInterval)
+	}
+	return s
+}
+
+// Close stops the background sweep goroutine. It is safe to call multiple
+// times.
+func (s *MemoryStore) Close() {
+	s.closeOnce.Do(func() {
+		close(s.stopCh)
+	})
+}
+
+func (s *MemoryStore) sweep(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			s.deleteExpired()
+		case <-s.stopCh:
+			return
+		}
+	}
+}
+
+// touchKey updates the expiry for a key in the min-heap. Must be called
+// while s.mu is held.
+func (s *MemoryStore) touchKey(key string, mt mapType, ttl time.Duration) {
+	expiry := s.now().Add(ttl)
+	hk := heapKey{mt: mt, key: key}
+	if item, ok := s.lookup[hk]; ok {
+		item.expiry = expiry
+		heap.Fix(&s.eh, item.index)
+		return
+	}
+	item := &heapItem{key: key, mt: mt, expiry: expiry}
+	s.lookup[hk] = item
+	heap.Push(&s.eh, item)
+}
+
+func (s *MemoryStore) deleteExpired() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	for s.eh.Len() > 0 {
+		if s.eh[0].expiry.After(now) {
+			break
+		}
+		item := heap.Pop(&s.eh).(*heapItem)
+		delete(s.lookup, heapKey{mt: item.mt, key: item.key})
+		switch item.mt {
+		case mapEntries:
+			delete(s.entries, item.key)
+		case mapSliding:
+			delete(s.sliding, item.key)
+		case mapTokens:
+			delete(s.tokens, item.key)
+		case mapGCRA:
+			delete(s.gcra, item.key)
+		}
 	}
 }
 
@@ -66,6 +164,7 @@ func (s *MemoryStore) CheckAndIncrement(ctx context.Context, key string, window 
 			count:     n,
 			expiresAt: now.Add(window.Period),
 		}
+		s.touchKey(key, mapEntries, window.Period)
 		return n, true, nil
 	}
 
@@ -82,6 +181,7 @@ func (s *MemoryStore) CheckAndIncrementSliding(ctx context.Context, key string, 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	ttl := 2 * window.Period
 	now := s.now()
 	e, ok := s.sliding[key]
 	if !ok {
@@ -89,8 +189,11 @@ func (s *MemoryStore) CheckAndIncrementSliding(ctx context.Context, key string, 
 			return 0, 0, 0, false, nil
 		}
 		s.sliding[key] = &slidingEntry{curr: n, currStart: now}
+		s.touchKey(key, mapSliding, ttl)
 		return n, 0, 0, true, nil
 	}
+
+	s.touchKey(key, mapSliding, ttl)
 
 	// Rotate buckets based on how many periods have elapsed since currStart.
 	periods := int64(now.Sub(e.currStart) / window.Period)
@@ -134,11 +237,13 @@ func (s *MemoryStore) CheckAndConsumeTokens(ctx context.Context, key string, cap
 		if n > capacity {
 			return capacity, 0, false, nil
 		}
+		tokens := capacity - n
 		s.tokens[key] = &tokenEntry{
-			tokens:     capacity - n,
+			tokens:     tokens,
 			lastRefill: now,
 		}
-		return capacity - n, 0, true, nil
+		s.touchKey(key, mapTokens, time.Duration(capacity-tokens)*emissionInterval)
+		return tokens, 0, true, nil
 	}
 
 	// Lazy advance: credit only complete emission intervals; carry the
@@ -158,6 +263,12 @@ func (s *MemoryStore) CheckAndConsumeTokens(ctx context.Context, key string, cap
 	}
 
 	sinceLastRefill := now.Sub(e.lastRefill)
+	ttl := time.Duration(capacity-e.tokens)*emissionInterval - sinceLastRefill
+	if ttl < 0 {
+		ttl = 0
+	}
+	s.touchKey(key, mapTokens, ttl)
+
 	return e.tokens, sinceLastRefill, applied, nil
 }
 
@@ -189,6 +300,7 @@ func (s *MemoryStore) CheckAndAdvanceTAT(ctx context.Context, key string, burst 
 	} else {
 		e.tat = newTAT
 	}
+	s.touchKey(key, mapGCRA, delay)
 	return delay, true, nil
 }
 
@@ -201,5 +313,13 @@ func (s *MemoryStore) Reset(ctx context.Context, key string) error {
 	delete(s.sliding, key)
 	delete(s.tokens, key)
 	delete(s.gcra, key)
+
+	for _, mt := range []mapType{mapEntries, mapSliding, mapTokens, mapGCRA} {
+		hk := heapKey{mt: mt, key: key}
+		if item, ok := s.lookup[hk]; ok {
+			heap.Remove(&s.eh, item.index)
+			delete(s.lookup, hk)
+		}
+	}
 	return nil
 }
