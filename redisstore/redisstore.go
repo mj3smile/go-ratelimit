@@ -210,7 +210,7 @@ if not tokens then
         return {capacity, 0, 0}
     end
     redis.call('HSET', key, 'tokens', capacity - n, 'last_refill', now_ms)
-    redis.call('PEXPIRE', key, n * emission_interval_ms)
+    redis.call('PEXPIRE', key, math.ceil(n * emission_interval_ms))
     return {capacity - n, 0, 1}
 end
 
@@ -235,7 +235,7 @@ local ttl = (capacity - tokens) * emission_interval_ms - since_last_refill
 if ttl < 0 then
     ttl = 0
 end
-redis.call('PEXPIRE', key, ttl)
+redis.call('PEXPIRE', key, math.ceil(ttl))
 return {tokens, since_last_refill, applied}
 `)
 
@@ -265,7 +265,7 @@ if delay > delay_tolerance_ms then
 end
 
 redis.call('SET', key, new_tat)
-redis.call('PEXPIRE', key, delay)
+redis.call('PEXPIRE', key, math.ceil(delay))
 return {delay, 1}
 `)
 

@@ -448,3 +448,36 @@ func TestRedisStore_TTLExtension(t *testing.T) {
 		t.Errorf("fw: TTL must not be refreshed (window boundary is fixed), before=%v after=%v", before["fw"], after["fw"])
 	}
 }
+
+// --- Fractional emission interval ---
+
+// When the rate does not divide the period evenly the per-token emission
+// interval is fractional in milliseconds (3/s → 333.33ms). The token bucket and
+// GCRA TTL math is built on that interval, so the value handed to PEXPIRE must be
+// rounded up to a whole millisecond — Redis rejects a fractional PEXPIRE argument.
+func TestRedisStore_FractionalEmission(t *testing.T) {
+	store, client := newStore(t)
+	ctx := context.Background()
+	window := ratelimit.Window{Rate: 3, Period: time.Second} // emission ≈ 333.33ms
+
+	// Token bucket exercises both the fresh-key and existing-key PEXPIRE paths.
+	if _, _, _, err := store.CheckAndConsumeTokens(ctx, "tb", 5, window, 1); err != nil {
+		t.Fatalf("token bucket fresh key: %v", err)
+	}
+	if _, _, _, err := store.CheckAndConsumeTokens(ctx, "tb", 5, window, 1); err != nil {
+		t.Fatalf("token bucket existing key: %v", err)
+	}
+	if ttl := client.PTTL(ctx, store.redisKey("tb", "tb")).Val(); ttl <= 0 {
+		t.Errorf("tb: expected a positive TTL, got %v", ttl)
+	}
+
+	if _, _, err := store.CheckAndAdvanceTAT(ctx, "gcra", 5, window, 1); err != nil {
+		t.Fatalf("gcra fresh key: %v", err)
+	}
+	if _, _, err := store.CheckAndAdvanceTAT(ctx, "gcra", 5, window, 1); err != nil {
+		t.Fatalf("gcra existing key: %v", err)
+	}
+	if ttl := client.PTTL(ctx, store.redisKey("gcra", "gcra")).Val(); ttl <= 0 {
+		t.Errorf("gcra: expected a positive TTL, got %v", ttl)
+	}
+}
