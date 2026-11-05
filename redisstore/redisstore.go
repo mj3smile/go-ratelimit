@@ -40,7 +40,7 @@ func New(client redis.Cmdable, opts ...Option) *Store {
 }
 
 func (s *Store) redisKey(key, suffix string) string {
-	return s.prefix + "{" + key + "}:" + suffix
+	return s.prefix + key + ":" + suffix
 }
 
 func (s *Store) CheckAndIncrement(ctx context.Context, key string, window ratelimit.Window, n int64) (int64, bool, error) {
@@ -105,15 +105,24 @@ func (s *Store) CheckAndAdvanceTAT(ctx context.Context, key string, burst int64,
 	return delay, res[1] == 1, nil
 }
 
-func (s *Store) Reset(ctx context.Context, key string) error {
-	keys := []string{
-		s.redisKey(key, "fw"),
-		s.redisKey(key, "sw"),
-		s.redisKey(key, "tb"),
-		s.redisKey(key, "gcra"),
-	}
-	_, err := resetScript.Run(ctx, s.client, keys).Result()
-	if err != nil {
+func (s *Store) ResetFixed(ctx context.Context, key string) error {
+	return s.reset(ctx, key, "fw")
+}
+
+func (s *Store) ResetSliding(ctx context.Context, key string) error {
+	return s.reset(ctx, key, "sw")
+}
+
+func (s *Store) ResetTokens(ctx context.Context, key string) error {
+	return s.reset(ctx, key, "tb")
+}
+
+func (s *Store) ResetTAT(ctx context.Context, key string) error {
+	return s.reset(ctx, key, "gcra")
+}
+
+func (s *Store) reset(ctx context.Context, key, suffix string) error {
+	if err := s.client.Del(ctx, s.redisKey(key, suffix)).Err(); err != nil {
 		return fmt.Errorf("redisstore: reset: %w", err)
 	}
 	return nil
@@ -267,11 +276,4 @@ end
 redis.call('SET', key, new_tat)
 redis.call('PEXPIRE', key, math.ceil(delay))
 return {delay, 1}
-`)
-
-var resetScript = redis.NewScript(`
-for _, key in ipairs(KEYS) do
-    redis.call('DEL', key)
-end
-return 1
 `)

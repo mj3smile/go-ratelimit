@@ -70,19 +70,41 @@ func TestMemoryStore_CheckAndIncrement_Denied(t *testing.T) {
 	}
 }
 
-func TestMemoryStore_Reset(t *testing.T) {
+// Reset is scoped to one algorithm: it clears that algorithm's map for the
+// subject and leaves the other three untouched.
+func TestMemoryStore_ResetByAlgorithm(t *testing.T) {
 	ctx := context.Background()
-	store := NewMemoryStore()
 	window := Window{Rate: 10, Period: time.Minute}
 
-	store.CheckAndIncrement(ctx, "key", window, 1)
-	if err := store.Reset(ctx, "key"); err != nil {
-		t.Fatalf("unexpected error on reset: %v", err)
+	cases := []struct {
+		name    string
+		reset   func(*MemoryStore) error
+		cleared func(*MemoryStore) int
+	}{
+		{"ResetFixed", func(s *MemoryStore) error { return s.ResetFixed(ctx, "key") }, func(s *MemoryStore) int { return len(s.entries) }},
+		{"ResetSliding", func(s *MemoryStore) error { return s.ResetSliding(ctx, "key") }, func(s *MemoryStore) int { return len(s.sliding) }},
+		{"ResetTokens", func(s *MemoryStore) error { return s.ResetTokens(ctx, "key") }, func(s *MemoryStore) int { return len(s.tokens) }},
+		{"ResetTAT", func(s *MemoryStore) error { return s.ResetTAT(ctx, "key") }, func(s *MemoryStore) int { return len(s.gcra) }},
 	}
 
-	count, _, _ := store.CheckAndIncrement(ctx, "key", window, 1)
-	if count != 1 {
-		t.Errorf("count after reset = %d, want 1", count)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := NewMemoryStore(WithSweepInterval(0))
+			store.CheckAndIncrement(ctx, "key", window, 1)
+			store.CheckAndIncrementSliding(ctx, "key", window, 1)
+			store.CheckAndConsumeTokens(ctx, "key", 10, window, 1)
+			store.CheckAndAdvanceTAT(ctx, "key", 10, window, 1)
+
+			if err := tc.reset(store); err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			if got := tc.cleared(store); got != 0 {
+				t.Errorf("%s should clear its own map, got len %d", tc.name, got)
+			}
+			if total := len(store.entries) + len(store.sliding) + len(store.tokens) + len(store.gcra); total != 3 {
+				t.Errorf("%s must leave the other three maps intact, total = %d, want 3", tc.name, total)
+			}
+		})
 	}
 }
 
@@ -643,7 +665,7 @@ func TestMemoryStore_Expiry_ResetCleansHeap(t *testing.T) {
 		t.Fatalf("heap len = %d, want 1", store.eh.Len())
 	}
 
-	store.Reset(ctx, "k")
+	store.ResetFixed(ctx, "k")
 	if store.eh.Len() != 0 {
 		t.Errorf("heap len after reset = %d, want 0", store.eh.Len())
 	}

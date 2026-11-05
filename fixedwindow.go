@@ -51,7 +51,7 @@ func (fw *fixedWindow) AllowN(ctx context.Context, key string, n int64) (Result,
 }
 
 func (fw *fixedWindow) Reset(ctx context.Context, key string) error {
-	return fw.store.Reset(ctx, key)
+	return fw.store.ResetFixed(ctx, key)
 }
 
 // retryAfter calculates the time remaining until the current window expires.

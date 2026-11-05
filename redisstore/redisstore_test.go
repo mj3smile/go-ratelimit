@@ -100,19 +100,50 @@ func TestRedisStore_CheckAndIncrement_Denied(t *testing.T) {
 	}
 }
 
-func TestRedisStore_Reset(t *testing.T) {
-	store, _ := newStore(t)
+// Reset is scoped to one algorithm: it clears that algorithm's key for the
+// subject and leaves the other three untouched.
+func TestRedisStore_ResetByAlgorithm(t *testing.T) {
+	store, client := newStore(t)
 	ctx := context.Background()
 	window := ratelimit.Window{Rate: 10, Period: time.Minute}
 
-	store.CheckAndIncrement(ctx, "key", window, 1)
-	if err := store.Reset(ctx, "key"); err != nil {
-		t.Fatalf("unexpected error on reset: %v", err)
+	seed := func() {
+		store.CheckAndIncrement(ctx, "key", window, 1)
+		store.CheckAndIncrementSliding(ctx, "key", window, 1)
+		store.CheckAndConsumeTokens(ctx, "key", 10, window, 1)
+		store.CheckAndAdvanceTAT(ctx, "key", 10, window, 1)
 	}
 
-	count, _, _ := store.CheckAndIncrement(ctx, "key", window, 1)
-	if count != 1 {
-		t.Errorf("count after reset = %d, want 1", count)
+	suffixes := []string{"fw", "sw", "tb", "gcra"}
+	cases := []struct {
+		name    string
+		reset   func() error
+		cleared string
+	}{
+		{"ResetFixed", func() error { return store.ResetFixed(ctx, "key") }, "fw"},
+		{"ResetSliding", func() error { return store.ResetSliding(ctx, "key") }, "sw"},
+		{"ResetTokens", func() error { return store.ResetTokens(ctx, "key") }, "tb"},
+		{"ResetTAT", func() error { return store.ResetTAT(ctx, "key") }, "gcra"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client.FlushDB(ctx)
+			seed()
+			if err := tc.reset(); err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			for _, suffix := range suffixes {
+				exists := client.Exists(ctx, store.redisKey("key", suffix)).Val()
+				if suffix == tc.cleared {
+					if exists != 0 {
+						t.Errorf("%s should clear the %q key", tc.name, suffix)
+					}
+				} else if exists != 1 {
+					t.Errorf("%s must leave the %q key intact", tc.name, suffix)
+				}
+			}
+		})
 	}
 }
 

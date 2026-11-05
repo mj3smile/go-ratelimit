@@ -134,8 +134,17 @@ type Store interface {
 	// Remaining (when allowed) or RetryAfter (when denied).
 	CheckAndAdvanceTAT(ctx context.Context, key string, burst int64, window Window, n int64) (delay time.Duration, applied bool, err error)
 
-	// Reset removes the rate limit state for the given key.
-	Reset(ctx context.Context, key string) error
+	// ResetFixed removes the fixed-window state for the given key.
+	ResetFixed(ctx context.Context, key string) error
+
+	// ResetSliding removes the sliding-window state for the given key.
+	ResetSliding(ctx context.Context, key string) error
+
+	// ResetTokens removes the token-bucket state for the given key.
+	ResetTokens(ctx context.Context, key string) error
+
+	// ResetTAT removes the GCRA (leaky bucket) state for the given key.
+	ResetTAT(ctx context.Context, key string) error
 }
 
 // OnResultFunc is called after every rate limit check with the request context,

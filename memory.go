@@ -134,16 +134,22 @@ func (s *MemoryStore) deleteExpired() {
 		}
 		item := heap.Pop(&s.eh).(*heapItem)
 		delete(s.lookup, heapKey{mt: item.mt, key: item.key})
-		switch item.mt {
-		case mapEntries:
-			delete(s.entries, item.key)
-		case mapSliding:
-			delete(s.sliding, item.key)
-		case mapTokens:
-			delete(s.tokens, item.key)
-		case mapGCRA:
-			delete(s.gcra, item.key)
-		}
+		s.deleteFromMap(item.mt, item.key)
+	}
+}
+
+// deleteFromMap removes key from the state map identified by mt. Caller must
+// hold s.mu.
+func (s *MemoryStore) deleteFromMap(mt mapType, key string) {
+	switch mt {
+	case mapEntries:
+		delete(s.entries, key)
+	case mapSliding:
+		delete(s.sliding, key)
+	case mapTokens:
+		delete(s.tokens, key)
+	case mapGCRA:
+		delete(s.gcra, key)
 	}
 }
 
@@ -304,22 +310,36 @@ func (s *MemoryStore) CheckAndAdvanceTAT(ctx context.Context, key string, burst 
 	return delay, true, nil
 }
 
-// Reset removes the rate limit state for the given key.
-func (s *MemoryStore) Reset(ctx context.Context, key string) error {
+// ResetFixed removes the fixed-window state for the given key.
+func (s *MemoryStore) ResetFixed(ctx context.Context, key string) error {
+	return s.reset(key, mapEntries)
+}
+
+// ResetSliding removes the sliding-window state for the given key.
+func (s *MemoryStore) ResetSliding(ctx context.Context, key string) error {
+	return s.reset(key, mapSliding)
+}
+
+// ResetTokens removes the token-bucket state for the given key.
+func (s *MemoryStore) ResetTokens(ctx context.Context, key string) error {
+	return s.reset(key, mapTokens)
+}
+
+// ResetTAT removes the GCRA state for the given key.
+func (s *MemoryStore) ResetTAT(ctx context.Context, key string) error {
+	return s.reset(key, mapGCRA)
+}
+
+func (s *MemoryStore) reset(key string, mt mapType) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	delete(s.entries, key)
-	delete(s.sliding, key)
-	delete(s.tokens, key)
-	delete(s.gcra, key)
+	s.deleteFromMap(mt, key)
 
-	for _, mt := range []mapType{mapEntries, mapSliding, mapTokens, mapGCRA} {
-		hk := heapKey{mt: mt, key: key}
-		if item, ok := s.lookup[hk]; ok {
-			heap.Remove(&s.eh, item.index)
-			delete(s.lookup, hk)
-		}
+	hk := heapKey{mt: mt, key: key}
+	if item, ok := s.lookup[hk]; ok {
+		heap.Remove(&s.eh, item.index)
+		delete(s.lookup, hk)
 	}
 	return nil
 }

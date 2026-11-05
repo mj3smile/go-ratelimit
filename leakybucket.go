@@ -62,5 +62,5 @@ func (lb *leakyBucket) AllowN(ctx context.Context, key string, n int64) (Result,
 }
 
 func (lb *leakyBucket) Reset(ctx context.Context, key string) error {
-	return lb.store.Reset(ctx, key)
+	return lb.store.ResetTAT(ctx, key)
 }
