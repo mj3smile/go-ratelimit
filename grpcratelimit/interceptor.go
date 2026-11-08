@@ -9,7 +9,6 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
-	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 )
 
@@ -41,7 +40,7 @@ type config struct {
 }
 
 // WithKeyFunc sets the function used to extract a rate limit key from each
-// RPC. The default extracts the peer address.
+// RPC. The default is DefaultKeyFunc.
 func WithKeyFunc(fn KeyFunc) Option {
 	return func(c *config) {
 		c.keyFunc = fn
@@ -94,14 +93,6 @@ func applyDefaults(opts []Option) config {
 		opt(&cfg)
 	}
 	return cfg
-}
-
-// DefaultKeyFunc extracts the peer address from the gRPC connection.
-func DefaultKeyFunc(ctx context.Context, _ *grpc.UnaryServerInfo) string {
-	if p, ok := peer.FromContext(ctx); ok {
-		return p.Addr.String()
-	}
-	return "unknown"
 }
 
 func setTrailers(ctx context.Context, result ratelimit.Result) {

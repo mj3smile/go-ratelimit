@@ -3,10 +3,8 @@ package ratelimit
 import (
 	"encoding/json"
 	"math"
-	"net"
 	"net/http"
 	"strconv"
-	"strings"
 )
 
 // KeyFunc extracts a rate limit key from an HTTP request.
@@ -42,8 +40,7 @@ type middlewareConfig struct {
 }
 
 // WithKeyFunc sets the function used to extract a rate limit key from each
-// request. The default extracts the client IP from X-Forwarded-For (first
-// entry) or RemoteAddr.
+// request. The default is DefaultKeyFunc.
 func WithKeyFunc(fn KeyFunc) MiddlewareOption {
 	return func(c *middlewareConfig) {
 		c.keyFunc = fn
@@ -93,22 +90,6 @@ func HTTPMiddleware(limiter Limiter, opts ...MiddlewareOption) func(http.Handler
 			next.ServeHTTP(w, r)
 		})
 	}
-}
-
-// DefaultKeyFunc extracts the client IP from X-Forwarded-For (first entry) or
-// falls back to the IP portion of RemoteAddr.
-func DefaultKeyFunc(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		if ip, _, ok := strings.Cut(xff, ","); ok {
-			return strings.TrimSpace(ip)
-		}
-		return strings.TrimSpace(xff)
-	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
 }
 
 func defaultDeniedHandler(w http.ResponseWriter, _ *http.Request) {

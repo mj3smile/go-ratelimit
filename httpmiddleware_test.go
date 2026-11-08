@@ -126,57 +126,6 @@ func TestHTTPMiddleware_CustomKeyFunc(t *testing.T) {
 	}
 }
 
-func TestDefaultKeyFunc(t *testing.T) {
-	tests := []struct {
-		name       string
-		remoteAddr string
-		xff        string
-		want       string
-	}{
-		{
-			name:       "remote addr with port",
-			remoteAddr: "192.168.1.1:8080",
-			want:       "192.168.1.1",
-		},
-		{
-			name:       "remote addr without port",
-			remoteAddr: "192.168.1.1",
-			want:       "192.168.1.1",
-		},
-		{
-			name:       "xff single IP",
-			remoteAddr: "10.0.0.1:1234",
-			xff:        "203.0.113.50",
-			want:       "203.0.113.50",
-		},
-		{
-			name:       "xff chain takes first",
-			remoteAddr: "10.0.0.1:1234",
-			xff:        "203.0.113.50, 70.41.3.18, 150.172.238.178",
-			want:       "203.0.113.50",
-		},
-		{
-			name:       "ipv6 remote addr",
-			remoteAddr: "[::1]:8080",
-			want:       "::1",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, "/", nil)
-			req.RemoteAddr = tt.remoteAddr
-			if tt.xff != "" {
-				req.Header.Set("X-Forwarded-For", tt.xff)
-			}
-			got := DefaultKeyFunc(req)
-			if got != tt.want {
-				t.Errorf("DefaultKeyFunc = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestHTTPMiddlewareN(t *testing.T) {
 	limiter := New(WithRate(10, time.Minute))
 	costFn := func(r *http.Request) int64 {
