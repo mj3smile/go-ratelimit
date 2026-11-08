@@ -43,7 +43,7 @@ func (s *Store) redisKey(key, suffix string) string {
 	return s.prefix + key + ":" + suffix
 }
 
-func (s *Store) CheckAndIncrement(ctx context.Context, key string, window ratelimit.Window, n int64) (int64, bool, error) {
+func (s *Store) CheckAndIncrement(ctx context.Context, key string, window ratelimit.Window, n int64) (int64, time.Duration, bool, error) {
 	rk := s.redisKey(key, "fw")
 	periodMS := window.Period.Milliseconds()
 
@@ -51,10 +51,11 @@ func (s *Store) CheckAndIncrement(ctx context.Context, key string, window rateli
 		window.Rate, n, periodMS,
 	).Int64Slice()
 	if err != nil {
-		return 0, false, fmt.Errorf("redisstore: fixed window script: %w", err)
+		return 0, 0, false, fmt.Errorf("redisstore: fixed window script: %w", err)
 	}
 
-	return res[0], res[1] == 1, nil
+	resetAfter := time.Duration(res[1]) * time.Millisecond
+	return res[0], resetAfter, res[2] == 1, nil
 }
 
 func (s *Store) CheckAndIncrementSliding(ctx context.Context, key string, window ratelimit.Window, n int64) (int64, int64, time.Duration, bool, error) {
@@ -135,17 +136,24 @@ local n = tonumber(ARGV[2])
 local period_ms = tonumber(ARGV[3])
 
 local count = tonumber(redis.call('GET', key)) or 0
+local ttl = redis.call('PTTL', key)
+local reset_after = ttl
+if ttl < 0 then
+    reset_after = period_ms
+elseif ttl == 0 then
+    reset_after = 1
+end
 
 if count + n > rate then
-    return {count, 0}
+    return {count, reset_after, 0}
 end
 
 local new_count = redis.call('INCRBY', key, n)
-if redis.call('PTTL', key) == -1 then
+if ttl < 0 then
     redis.call('PEXPIRE', key, period_ms)
 end
 
-return {new_count, 1}
+return {new_count, reset_after, 1}
 `)
 
 var slidingWindowScript = redis.NewScript(`

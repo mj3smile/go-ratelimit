@@ -132,28 +132,29 @@ func TestFixedWindow_AllowN(t *testing.T) {
 func TestFixedWindow_RetryAfter(t *testing.T) {
 	ctx := context.Background()
 
-	limiter := New(WithRate(1, time.Minute))
+	store := NewMemoryStore()
+	now := time.Date(2026, 1, 1, 0, 0, 50, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	limiter := newFixedWindow(Window{Rate: 1, Period: time.Minute}, store, nil)
 
-	result, err := limiter.Allow(ctx, "test-key")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result.RetryAfter != 0 {
-		t.Errorf("allowed request: RetryAfter = %v, want 0", result.RetryAfter)
+	result, _ := limiter.Allow(ctx, "key")
+	if !result.Allowed || result.RetryAfter != 0 {
+		t.Fatalf("first request: %+v, want allowed with RetryAfter 0", result)
 	}
 
-	result, err = limiter.Allow(ctx, "test-key")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	now = now.Add(5 * time.Second)
+	result, _ = limiter.Allow(ctx, "key")
 	if result.Allowed {
 		t.Fatal("second request should be blocked")
 	}
-	if result.RetryAfter <= 0 {
-		t.Error("blocked request: RetryAfter should be positive")
+	if want := 55 * time.Second; result.RetryAfter != want {
+		t.Errorf("RetryAfter = %v, want %v: the window started at the first request", result.RetryAfter, want)
 	}
-	if result.RetryAfter > time.Minute {
-		t.Errorf("blocked request: RetryAfter = %v, should be <= 1m", result.RetryAfter)
+
+	now = now.Add(result.RetryAfter)
+	result, _ = limiter.Allow(ctx, "key")
+	if !result.Allowed {
+		t.Error("request after waiting RetryAfter should be allowed")
 	}
 }
 
@@ -185,7 +186,6 @@ func TestFixedWindow_WindowExpiry(t *testing.T) {
 	store.now = func() time.Time { return now }
 
 	limiter := newFixedWindow(Window{Rate: 1, Period: time.Second}, store, nil)
-	limiter.now = func() time.Time { return now }
 
 	result, _ := limiter.Allow(ctx, "key")
 	if !result.Allowed {

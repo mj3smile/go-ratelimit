@@ -45,7 +45,7 @@ func TestRedisStore_CheckAndIncrement(t *testing.T) {
 	ctx := context.Background()
 	window := ratelimit.Window{Rate: 10, Period: time.Minute}
 
-	count, applied, err := store.CheckAndIncrement(ctx, "key", window, 1)
+	count, _, applied, err := store.CheckAndIncrement(ctx, "key", window, 1)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestRedisStore_CheckAndIncrement(t *testing.T) {
 		t.Errorf("count = %d, want 1", count)
 	}
 
-	count, applied, err = store.CheckAndIncrement(ctx, "key", window, 5)
+	count, _, applied, err = store.CheckAndIncrement(ctx, "key", window, 5)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestRedisStore_CheckAndIncrement_Denied(t *testing.T) {
 	ctx := context.Background()
 	window := ratelimit.Window{Rate: 5, Period: time.Minute}
 
-	count, applied, _ := store.CheckAndIncrement(ctx, "key", window, 6)
+	count, _, applied, _ := store.CheckAndIncrement(ctx, "key", window, 6)
 	if applied {
 		t.Error("expected applied=false for n > rate")
 	}
@@ -83,7 +83,7 @@ func TestRedisStore_CheckAndIncrement_Denied(t *testing.T) {
 
 	store.CheckAndIncrement(ctx, "key", window, 3)
 
-	count, applied, _ = store.CheckAndIncrement(ctx, "key", window, 5)
+	count, _, applied, _ = store.CheckAndIncrement(ctx, "key", window, 5)
 	if applied {
 		t.Error("expected applied=false, would exceed limit")
 	}
@@ -91,12 +91,36 @@ func TestRedisStore_CheckAndIncrement_Denied(t *testing.T) {
 		t.Errorf("count = %d, want 3 (unchanged)", count)
 	}
 
-	count, applied, _ = store.CheckAndIncrement(ctx, "key", window, 2)
+	count, _, applied, _ = store.CheckAndIncrement(ctx, "key", window, 2)
 	if !applied {
 		t.Error("expected applied=true")
 	}
 	if count != 5 {
 		t.Errorf("count = %d, want 5", count)
+	}
+}
+
+func TestRedisStore_CheckAndIncrement_ResetAfter(t *testing.T) {
+	store, _ := newStore(t)
+	ctx := context.Background()
+	window := ratelimit.Window{Rate: 1, Period: time.Minute}
+
+	_, resetAfter, _, err := store.CheckAndIncrement(ctx, "key", window, 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resetAfter != time.Minute {
+		t.Errorf("new window: resetAfter = %v, want %v", resetAfter, time.Minute)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	_, resetAfter, applied, _ := store.CheckAndIncrement(ctx, "key", window, 1)
+	if applied {
+		t.Fatal("second increment should be denied")
+	}
+	if d := absDiff(resetAfter, 59800*time.Millisecond); d > 100*time.Millisecond {
+		t.Errorf("denied: resetAfter = %v, want about 59.8s (the time left in the window)", resetAfter)
 	}
 }
 
@@ -156,7 +180,7 @@ func TestRedisStore_WindowExpiry(t *testing.T) {
 
 	time.Sleep(1500 * time.Millisecond)
 
-	count, applied, _ := store.CheckAndIncrement(ctx, "key", window, 1)
+	count, _, applied, _ := store.CheckAndIncrement(ctx, "key", window, 1)
 	if !applied {
 		t.Error("expected applied=true after window expiry")
 	}

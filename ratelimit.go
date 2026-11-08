@@ -12,8 +12,8 @@ import (
 type Algorithm int
 
 const (
-	// FixedWindow divides time into fixed-duration windows and counts
-	// requests within each window.
+	// FixedWindow counts requests in windows of a fixed duration. A key's
+	// window starts with its first request and lasts one period.
 	FixedWindow Algorithm = iota
 
 	// SlidingWindow uses a sliding time window for smoother rate limiting.
@@ -75,9 +75,12 @@ type Limiter interface {
 type Store interface {
 	// CheckAndIncrement atomically increments the counter for a key by n within
 	// the given window, but only if the resulting count would not exceed
-	// window.Rate. It returns the current count (after increment if applied,
-	// otherwise unchanged) and whether the increment was applied.
-	CheckAndIncrement(ctx context.Context, key string, window Window, n int64) (count int64, applied bool, err error)
+	// window.Rate. A key's window starts with its first increment and lasts
+	// window.Period. It returns the current count (after increment if applied,
+	// otherwise unchanged), the time left until the window ends and the count
+	// resets, and whether the increment was applied. When no window is active,
+	// resetAfter is window.Period.
+	CheckAndIncrement(ctx context.Context, key string, window Window, n int64) (count int64, resetAfter time.Duration, applied bool, err error)
 
 	// CheckAndIncrementSliding atomically applies a 2-bucket sliding window
 	// check for the given key. It maintains two consecutive buckets of size

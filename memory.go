@@ -156,29 +156,30 @@ func (s *MemoryStore) deleteFromMap(mt mapType, key string) {
 // CheckAndIncrement atomically increments the counter for a key by n within
 // the given window, but only if the resulting count would not exceed
 // window.Rate. If the window has expired, the counter resets before the check.
-func (s *MemoryStore) CheckAndIncrement(ctx context.Context, key string, window Window, n int64) (int64, bool, error) {
+func (s *MemoryStore) CheckAndIncrement(ctx context.Context, key string, window Window, n int64) (int64, time.Duration, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	now := s.now()
 	e, ok := s.entries[key]
-	if !ok || now.After(e.expiresAt) {
+	if !ok || !now.Before(e.expiresAt) {
 		if n > window.Rate {
-			return 0, false, nil
+			return 0, window.Period, false, nil
 		}
 		s.entries[key] = &entry{
 			count:     n,
 			expiresAt: now.Add(window.Period),
 		}
 		s.touchKey(key, mapEntries, window.Period)
-		return n, true, nil
+		return n, window.Period, true, nil
 	}
 
+	resetAfter := e.expiresAt.Sub(now)
 	if e.count+n > window.Rate {
-		return e.count, false, nil
+		return e.count, resetAfter, false, nil
 	}
 	e.count += n
-	return e.count, true, nil
+	return e.count, resetAfter, true, nil
 }
 
 // CheckAndIncrementSliding atomically applies a 2-bucket sliding window check

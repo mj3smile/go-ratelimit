@@ -11,7 +11,7 @@ func TestMemoryStore_CheckAndIncrement(t *testing.T) {
 	store := NewMemoryStore()
 	window := Window{Rate: 10, Period: time.Minute}
 
-	count, applied, err := store.CheckAndIncrement(ctx, "key", window, 1)
+	count, _, applied, err := store.CheckAndIncrement(ctx, "key", window, 1)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -22,7 +22,7 @@ func TestMemoryStore_CheckAndIncrement(t *testing.T) {
 		t.Errorf("count = %d, want 1", count)
 	}
 
-	count, applied, err = store.CheckAndIncrement(ctx, "key", window, 5)
+	count, _, applied, err = store.CheckAndIncrement(ctx, "key", window, 5)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -40,7 +40,7 @@ func TestMemoryStore_CheckAndIncrement_Denied(t *testing.T) {
 	window := Window{Rate: 5, Period: time.Minute}
 
 	// n exceeds rate on fresh window
-	count, applied, _ := store.CheckAndIncrement(ctx, "key", window, 6)
+	count, _, applied, _ := store.CheckAndIncrement(ctx, "key", window, 6)
 	if applied {
 		t.Error("expected applied=false for n > rate")
 	}
@@ -52,7 +52,7 @@ func TestMemoryStore_CheckAndIncrement_Denied(t *testing.T) {
 	store.CheckAndIncrement(ctx, "key", window, 3)
 
 	// Next increment would overflow
-	count, applied, _ = store.CheckAndIncrement(ctx, "key", window, 5)
+	count, _, applied, _ = store.CheckAndIncrement(ctx, "key", window, 5)
 	if applied {
 		t.Error("expected applied=false, would exceed limit")
 	}
@@ -61,7 +61,7 @@ func TestMemoryStore_CheckAndIncrement_Denied(t *testing.T) {
 	}
 
 	// Smaller increment fits
-	count, applied, _ = store.CheckAndIncrement(ctx, "key", window, 2)
+	count, _, applied, _ = store.CheckAndIncrement(ctx, "key", window, 2)
 	if !applied {
 		t.Error("expected applied=true")
 	}
@@ -119,7 +119,7 @@ func TestMemoryStore_WindowExpiry(t *testing.T) {
 
 	now = now.Add(2 * time.Second)
 
-	count, applied, _ := store.CheckAndIncrement(ctx, "key", window, 1)
+	count, _, applied, _ := store.CheckAndIncrement(ctx, "key", window, 1)
 	if !applied {
 		t.Error("expected applied=true after window expiry")
 	}
@@ -142,7 +142,7 @@ func TestMemoryStore_ConcurrentAccess(t *testing.T) {
 	for i := 0; i < goroutines; i++ {
 		go func() {
 			for j := 0; j < perGoroutine; j++ {
-				_, ok, _ := store.CheckAndIncrement(ctx, "key", window, 1)
+				_, _, ok, _ := store.CheckAndIncrement(ctx, "key", window, 1)
 				applied <- ok
 			}
 			done <- struct{}{}
@@ -164,7 +164,7 @@ func TestMemoryStore_ConcurrentAccess(t *testing.T) {
 	}
 
 	// Quota is fully consumed — next increment must be denied.
-	_, ok, _ := store.CheckAndIncrement(ctx, "key", window, 1)
+	_, _, ok, _ := store.CheckAndIncrement(ctx, "key", window, 1)
 	if ok {
 		t.Error("expected denial after limit reached (race may have over-incremented)")
 	}

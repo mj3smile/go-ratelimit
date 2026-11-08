@@ -1,18 +1,14 @@
 package ratelimit
 
-import (
-	"context"
-	"time"
-)
+import "context"
 
 // fixedWindow implements the Limiter interface using the fixed window algorithm.
-// It divides time into discrete windows of a fixed duration and counts requests
-// within each window.
+// It counts requests per key in windows of a fixed duration, each starting with
+// the key's first request.
 type fixedWindow struct {
 	window   Window
 	store    Store
 	onResult OnResultFunc
-	now      func() time.Time // for testing
 }
 
 func newFixedWindow(window Window, store Store, onResult OnResultFunc) *fixedWindow {
@@ -20,7 +16,6 @@ func newFixedWindow(window Window, store Store, onResult OnResultFunc) *fixedWin
 		window:   window,
 		store:    store,
 		onResult: onResult,
-		now:      time.Now,
 	}
 }
 
@@ -29,7 +24,7 @@ func (fw *fixedWindow) Allow(ctx context.Context, key string) (Result, error) {
 }
 
 func (fw *fixedWindow) AllowN(ctx context.Context, key string, n int64) (Result, error) {
-	count, applied, err := fw.store.CheckAndIncrement(ctx, key, fw.window, n)
+	count, resetAfter, applied, err := fw.store.CheckAndIncrement(ctx, key, fw.window, n)
 	if err != nil {
 		return Result{}, err
 	}
@@ -40,7 +35,7 @@ func (fw *fixedWindow) AllowN(ctx context.Context, key string, n int64) (Result,
 		Limit:     fw.window.Rate,
 	}
 	if !applied {
-		result.RetryAfter = fw.retryAfter()
+		result.RetryAfter = resetAfter
 	}
 
 	if fw.onResult != nil {
@@ -52,12 +47,4 @@ func (fw *fixedWindow) AllowN(ctx context.Context, key string, n int64) (Result,
 
 func (fw *fixedWindow) Reset(ctx context.Context, key string) error {
 	return fw.store.ResetFixed(ctx, key)
-}
-
-// retryAfter calculates the time remaining until the current window expires.
-func (fw *fixedWindow) retryAfter() time.Duration {
-	now := fw.now()
-	windowStart := now.Truncate(fw.window.Period)
-	windowEnd := windowStart.Add(fw.window.Period)
-	return windowEnd.Sub(now)
 }
