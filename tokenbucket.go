@@ -13,11 +13,13 @@ import (
 //
 // State is held in the Store and updated atomically. The store uses a
 // "lazy advance" approach: lastRefill is only moved forward by integer
-// multiples of the emission interval (Period / Rate), so fractional refill
-// credit accumulates between calls instead of being lost to integer rounding.
+// multiples of the emission interval (Window.EmissionInterval), so fractional
+// refill credit accumulates between calls instead of being lost to integer
+// rounding.
 type tokenBucket struct {
 	window   Window
 	capacity int64
+	emission time.Duration
 	store    Store
 	onResult OnResultFunc
 }
@@ -26,6 +28,7 @@ func newTokenBucket(window Window, capacity int64, store Store, onResult OnResul
 	return &tokenBucket{
 		window:   window,
 		capacity: capacity,
+		emission: window.EmissionInterval(),
 		store:    store,
 		onResult: onResult,
 	}
@@ -63,8 +66,8 @@ func (tb *tokenBucket) Reset(ctx context.Context, key string) error {
 // retryAfter computes how long until n tokens become available given the
 // current token count and the time elapsed since the last credited refill.
 //
-// Each token takes T = Period/Rate to refill. We need (n - tokens) more
-// tokens, but already have sinceLastRefill toward the next one:
+// Each token takes T = the emission interval to refill. We need (n - tokens)
+// more tokens, but already have sinceLastRefill toward the next one:
 //
 //	retry = (n - tokens) * T - sinceLastRefill
 func (tb *tokenBucket) retryAfter(tokens int64, sinceLastRefill time.Duration, n int64) time.Duration {
@@ -72,8 +75,7 @@ func (tb *tokenBucket) retryAfter(tokens int64, sinceLastRefill time.Duration, n
 	if deficit <= 0 {
 		return 0
 	}
-	emissionInterval := tb.window.Period / time.Duration(tb.window.Rate)
-	retry := time.Duration(deficit)*emissionInterval - sinceLastRefill
+	retry := time.Duration(deficit)*tb.emission - sinceLastRefill
 	if retry < 0 {
 		retry = 0
 	}

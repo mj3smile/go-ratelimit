@@ -17,7 +17,7 @@ func newTestHandler() http.Handler {
 }
 
 func TestHTTPMiddleware_AllowAndHeaders(t *testing.T) {
-	limiter := New(WithRate(5, time.Minute))
+	limiter := mustNew(t, WithRate(5, time.Minute))
 	mw := HTTPMiddleware(limiter)
 	handler := mw(newTestHandler())
 
@@ -38,7 +38,7 @@ func TestHTTPMiddleware_AllowAndHeaders(t *testing.T) {
 }
 
 func TestHTTPMiddleware_Deny(t *testing.T) {
-	limiter := New(WithRate(1, time.Minute))
+	limiter := mustNew(t, WithRate(1, time.Minute))
 	mw := HTTPMiddleware(limiter)
 	handler := mw(newTestHandler())
 
@@ -75,7 +75,7 @@ func TestHTTPMiddleware_Deny(t *testing.T) {
 }
 
 func TestHTTPMiddleware_CustomDeniedHandler(t *testing.T) {
-	limiter := New(WithRate(1, time.Minute))
+	limiter := mustNew(t, WithRate(1, time.Minute))
 	custom := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		w.Write([]byte("custom"))
@@ -99,7 +99,7 @@ func TestHTTPMiddleware_CustomDeniedHandler(t *testing.T) {
 }
 
 func TestHTTPMiddleware_CustomKeyFunc(t *testing.T) {
-	limiter := New(WithRate(1, time.Minute))
+	limiter := mustNew(t, WithRate(1, time.Minute))
 	mw := HTTPMiddleware(limiter, WithKeyFunc(func(r *http.Request) string {
 		return r.Header.Get("X-API-Key")
 	}))
@@ -127,7 +127,7 @@ func TestHTTPMiddleware_CustomKeyFunc(t *testing.T) {
 }
 
 func TestHTTPMiddlewareN(t *testing.T) {
-	limiter := New(WithRate(10, time.Minute))
+	limiter := mustNew(t, WithRate(10, time.Minute))
 	costFn := func(r *http.Request) int64 {
 		if r.URL.Path == "/heavy" {
 			return 5

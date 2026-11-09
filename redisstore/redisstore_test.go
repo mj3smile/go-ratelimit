@@ -608,3 +608,35 @@ func TestRedisStore_CheckAndAdvanceTAT_FullBurst(t *testing.T) {
 		}
 	}
 }
+
+// At 600,000/s a token takes 1.67µs. The leaky bucket limiter computed with
+// that in nanoseconds while this store used whole microseconds, so a drained
+// bucket reported 239,855 remaining and the next denial said retry in 0s.
+func TestRedisStore_LeakyBucketLimiterAgrees(t *testing.T) {
+	store, _ := newStore(t)
+	ctx := context.Background()
+	limiter, err := ratelimit.New(
+		ratelimit.WithAlgorithm(ratelimit.LeakyBucket),
+		ratelimit.PerSecond(600_000),
+		ratelimit.WithStore(store),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	r, err := limiter.AllowN(ctx, "key", 600_000)
+	if err != nil {
+		t.Fatalf("full burst: %v", err)
+	}
+	if !r.Allowed || r.Remaining != 0 {
+		t.Errorf("full burst: Allowed=%v Remaining=%d, want allowed with 0 remaining", r.Allowed, r.Remaining)
+	}
+
+	r, err = limiter.AllowN(ctx, "key", 10_000)
+	if err != nil {
+		t.Fatalf("AllowN(10000): %v", err)
+	}
+	if r.Allowed || r.RetryAfter <= 0 {
+		t.Errorf("AllowN(10000) after the burst: Allowed=%v RetryAfter=%v, want denied with a positive wait", r.Allowed, r.RetryAfter)
+	}
+}

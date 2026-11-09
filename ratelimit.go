@@ -3,6 +3,7 @@ package ratelimit
 import (
 	"context"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -55,6 +56,22 @@ type Window struct {
 
 	// Period is the duration of the rate limit window.
 	Period time.Duration
+}
+
+// EmissionInterval returns the time it takes to earn one token: Period divided
+// by Rate, rounded up to a whole microsecond. The limiters and stores all use
+// this value, so a store that counts in microseconds, such as the Redis store,
+// agrees with one that counts in nanoseconds. Rounding up keeps the effective
+// rate at or below the configured one. Rate must be positive.
+func (w Window) EmissionInterval() time.Duration {
+	d := w.Period / time.Duration(w.Rate)
+	if w.Period%time.Duration(w.Rate) != 0 {
+		d++
+	}
+	if r := d % time.Microsecond; r != 0 {
+		d += time.Microsecond - r
+	}
+	return d
 }
 
 // Limiter checks whether a request identified by key is allowed.
@@ -110,7 +127,7 @@ type Store interface {
 	// tokens reflects the post-state token count. sinceLastRefill is the time
 	// elapsed since the last credited refill — always less than the emission
 	// interval, where the emission interval is the duration needed to
-	// produce one token (window.Period / window.Rate). The caller can use it
+	// produce one token (window.EmissionInterval()). The caller can use it
 	// to compute retry-after as:
 	// (n-tokens)*emissionInterval - sinceLastRefill.
 	//
@@ -125,7 +142,7 @@ type Store interface {
 	//
 	// The update rule:
 	//
-	//	emissionInterval = window.Period / window.Rate
+	//	emissionInterval = window.EmissionInterval()
 	//	delayTolerance   = burst * emissionInterval
 	//	newTAT           = max(now, tat) + n * emissionInterval
 	//	delay            = newTAT - now
@@ -166,6 +183,7 @@ type config struct {
 	burst     int64
 	store     Store
 	onResult  OnResultFunc
+	err       error
 }
 
 func defaultConfig() config {
@@ -185,7 +203,8 @@ func WithAlgorithm(algo Algorithm) Option {
 	}
 }
 
-// WithRate sets the maximum number of requests allowed per period.
+// WithRate sets the maximum number of requests allowed per period. See New for
+// the values it accepts.
 func WithRate(rate int64, period time.Duration) Option {
 	return func(c *config) {
 		c.window = Window{Rate: rate, Period: period}
@@ -204,8 +223,8 @@ func PerHour(n int64) Option { return WithRate(n, time.Hour) }
 // PerDay is shorthand for WithRate(n, 24*time.Hour).
 func PerDay(n int64) Option { return WithRate(n, 24*time.Hour) }
 
-// WithRateString sets the rate from a formatted string.
-// The format is "<count>-<unit>" where unit is one of:
+// WithRateString sets the rate from a formatted string, such as a limit read
+// from configuration. The format is "<count>-<unit>" where unit is one of:
 //   - S: per second
 //   - M: per minute
 //   - H: per hour
@@ -213,27 +232,29 @@ func PerDay(n int64) Option { return WithRate(n, 24*time.Hour) }
 //
 // Examples: "100-M" (100 per minute), "5-S" (5 per second), "1000-H" (1000 per hour).
 //
-// WithRateString panics if the format is invalid.
+// If the string is malformed, New returns the error.
 func WithRateString(rate string) Option {
-	window := ParseRateString(rate)
+	window, err := ParseRateString(rate)
 	return func(c *config) {
+		if err != nil {
+			c.err = err
+			return
+		}
 		c.window = window
 	}
 }
 
 // ParseRateString parses a rate string in the format "<count>-<unit>" into a Window.
 // See WithRateString for the supported format.
-//
-// ParseRateString panics if the format is invalid.
-func ParseRateString(rate string) Window {
+func ParseRateString(rate string) (Window, error) {
 	parts := strings.SplitN(rate, "-", 2)
 	if len(parts) != 2 {
-		panic(fmt.Sprintf("ratelimit: invalid rate string format: %q, expected \"<count>-<unit>\"", rate))
+		return Window{}, fmt.Errorf("ratelimit: invalid rate string format: %q, expected \"<count>-<unit>\"", rate)
 	}
 
 	count, err := strconv.ParseInt(parts[0], 10, 64)
 	if err != nil {
-		panic(fmt.Sprintf("ratelimit: invalid rate count in %q: %v", rate, err))
+		return Window{}, fmt.Errorf("ratelimit: invalid rate count in %q: %w", rate, err)
 	}
 
 	var period time.Duration
@@ -247,10 +268,10 @@ func ParseRateString(rate string) Window {
 	case "D":
 		period = 24 * time.Hour
 	default:
-		panic(fmt.Sprintf("ratelimit: invalid rate unit in %q: expected S, M, H, or D", rate))
+		return Window{}, fmt.Errorf("ratelimit: invalid rate unit in %q: expected S, M, H, or D", rate)
 	}
 
-	return Window{Rate: count, Period: period}
+	return Window{Rate: count, Period: period}, nil
 }
 
 // WithBurst sets the burst capacity for token-based algorithms
@@ -283,35 +304,81 @@ func WithOnResult(fn OnResultFunc) Option {
 // If no store is provided, an in-memory store is used.
 // If no algorithm is specified, FixedWindow is used.
 //
-// New panics if an unsupported algorithm is specified.
-func New(opts ...Option) Limiter {
+// New returns an error, and no Limiter, for settings it can't enforce:
+//   - a rate below 1, or a period that is not a whole number of milliseconds
+//     of at least 1ms;
+//   - a negative burst;
+//   - for TokenBucket and LeakyBucket, a rate faster than one token per
+//     microsecond (more than 1,000,000 per second), or a burst that would take
+//     more than about 146 years to refill;
+//   - for SlidingWindow, a period longer than about 146 years;
+//   - an unknown algorithm, or a malformed string passed to WithRateString.
+func New(opts ...Option) (Limiter, error) {
 	cfg := defaultConfig()
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-
-	if cfg.store == nil {
-		cfg.store = NewMemoryStore()
+	if err := cfg.validate(); err != nil {
+		return nil, err
 	}
 
 	switch cfg.algorithm {
 	case FixedWindow:
-		return newFixedWindow(cfg.window, cfg.store, cfg.onResult)
+		return newFixedWindow(cfg.window, cfg.storeOrDefault(), cfg.onResult), nil
 	case SlidingWindow:
-		return newSlidingWindow(cfg.window, cfg.store, cfg.onResult)
+		return newSlidingWindow(cfg.window, cfg.storeOrDefault(), cfg.onResult), nil
 	case TokenBucket:
-		burst := cfg.burst
-		if burst == 0 {
-			burst = cfg.window.Rate
-		}
-		return newTokenBucket(cfg.window, burst, cfg.store, cfg.onResult)
+		return newTokenBucket(cfg.window, cfg.bucketBurst(), cfg.storeOrDefault(), cfg.onResult), nil
 	case LeakyBucket:
-		burst := cfg.burst
-		if burst == 0 {
-			burst = cfg.window.Rate
-		}
-		return newLeakyBucket(cfg.window, burst, cfg.store, cfg.onResult)
+		return newLeakyBucket(cfg.window, cfg.bucketBurst(), cfg.storeOrDefault(), cfg.onResult), nil
 	default:
-		panic(fmt.Sprintf("ratelimit: unknown algorithm: %d", cfg.algorithm))
+		return nil, fmt.Errorf("ratelimit: unknown algorithm: %d", cfg.algorithm)
 	}
+}
+
+const maxDuration = time.Duration(math.MaxInt64)
+
+func (c config) validate() error {
+	if c.err != nil {
+		return c.err
+	}
+	w := c.window
+	if w.Rate < 1 {
+		return fmt.Errorf("ratelimit: rate must be at least 1, got %d", w.Rate)
+	}
+	if w.Period < time.Millisecond || w.Period%time.Millisecond != 0 {
+		return fmt.Errorf("ratelimit: period must be a whole number of milliseconds, at least 1ms, got %v", w.Period)
+	}
+	if c.burst < 0 {
+		return fmt.Errorf("ratelimit: burst must not be negative, got %d", c.burst)
+	}
+
+	switch c.algorithm {
+	case SlidingWindow:
+		if w.Period > maxDuration/2 {
+			return fmt.Errorf("ratelimit: period %v is too long for SlidingWindow, which keeps state for twice the period", w.Period)
+		}
+	case TokenBucket, LeakyBucket:
+		if w.Period/time.Duration(w.Rate) < time.Microsecond {
+			return fmt.Errorf("ratelimit: %d per %v gives less than 1µs per token; token and leaky buckets allow at most 1000000 per second", w.Rate, w.Period)
+		}
+		if burst := c.bucketBurst(); burst > int64(maxDuration/2/w.EmissionInterval()) {
+			return fmt.Errorf("ratelimit: a burst of %d at %v per token takes more than about 146 years to refill", burst, w.EmissionInterval())
+		}
+	}
+	return nil
+}
+
+func (c config) bucketBurst() int64 {
+	if c.burst == 0 {
+		return c.window.Rate
+	}
+	return c.burst
+}
+
+func (c config) storeOrDefault() Store {
+	if c.store != nil {
+		return c.store
+	}
+	return NewMemoryStore()
 }

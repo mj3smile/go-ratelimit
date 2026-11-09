@@ -37,7 +37,7 @@ func TestTokenBucket_Allow(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			limiter := New(tt.opts...)
+			limiter := mustNew(t, tt.opts...)
 			for i := 0; i < tt.requests; i++ {
 				result, err := limiter.Allow(ctx, "test-key")
 				if err != nil {
@@ -92,7 +92,7 @@ func TestTokenBucket_AllowN(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			limiter := New(
+			limiter := mustNew(t,
 				WithAlgorithm(TokenBucket),
 				WithRate(tt.rate, time.Minute),
 				WithBurst(tt.burst),
@@ -228,7 +228,7 @@ func TestTokenBucket_RetryAfter(t *testing.T) {
 func TestTokenBucket_Reset(t *testing.T) {
 	ctx := context.Background()
 
-	limiter := New(WithAlgorithm(TokenBucket), WithRate(1, time.Minute))
+	limiter := mustNew(t, WithAlgorithm(TokenBucket), WithRate(1, time.Minute))
 
 	r, _ := limiter.Allow(ctx, "k")
 	if !r.Allowed {
@@ -256,7 +256,7 @@ func TestTokenBucket_OnResult(t *testing.T) {
 	var calls int
 	var gotKey string
 	var gotTrace any
-	limiter := New(
+	limiter := mustNew(t,
 		WithAlgorithm(TokenBucket),
 		WithRate(1, time.Minute),
 		WithOnResult(func(cbCtx context.Context, key string, result Result) {
@@ -280,7 +280,7 @@ func TestTokenBucket_OnResult(t *testing.T) {
 func TestTokenBucket_SeparateKeys(t *testing.T) {
 	ctx := context.Background()
 
-	limiter := New(WithAlgorithm(TokenBucket), WithRate(1, time.Minute))
+	limiter := mustNew(t, WithAlgorithm(TokenBucket), WithRate(1, time.Minute))
 
 	r, _ := limiter.Allow(ctx, "a")
 	if !r.Allowed {

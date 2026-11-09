@@ -2,11 +2,21 @@ package grpcratelimit
 
 import (
 	"context"
+	"testing"
 
 	ratelimit "github.com/mj3smile/go-ratelimit"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 )
+
+func mustNew(t *testing.T, opts ...ratelimit.Option) ratelimit.Limiter {
+	t.Helper()
+	limiter, err := ratelimit.New(opts...)
+	if err != nil {
+		t.Fatalf("ratelimit.New: %v", err)
+	}
+	return limiter
+}
 
 var testInfo = &grpc.UnaryServerInfo{FullMethod: "/test.Service/Method"}
 var testStreamInfo = &grpc.StreamServerInfo{FullMethod: "/test.Service/StreamMethod"}

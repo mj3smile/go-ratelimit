@@ -41,7 +41,7 @@ func TestFixedWindow_Allow(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			limiter := New(WithRate(tt.rate, time.Minute))
+			limiter := mustNew(t, WithRate(tt.rate, time.Minute))
 
 			for i := 0; i < tt.requests; i++ {
 				result, err := limiter.Allow(ctx, "test-key")
@@ -111,7 +111,7 @@ func TestFixedWindow_AllowN(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			limiter := New(WithRate(tt.rate, time.Minute))
+			limiter := mustNew(t, WithRate(tt.rate, time.Minute))
 
 			for i, n := range tt.calls {
 				result, err := limiter.AllowN(ctx, "test-key", n)
@@ -161,7 +161,7 @@ func TestFixedWindow_RetryAfter(t *testing.T) {
 func TestFixedWindow_SeparateKeys(t *testing.T) {
 	ctx := context.Background()
 
-	limiter := New(WithRate(1, time.Minute))
+	limiter := mustNew(t, WithRate(1, time.Minute))
 
 	result, _ := limiter.Allow(ctx, "a")
 	if !result.Allowed {
@@ -207,7 +207,7 @@ func TestFixedWindow_WindowExpiry(t *testing.T) {
 func TestFixedWindow_Reset(t *testing.T) {
 	ctx := context.Background()
 
-	limiter := New(WithRate(1, time.Minute))
+	limiter := mustNew(t, WithRate(1, time.Minute))
 
 	limiter.Allow(ctx, "key")
 	result, _ := limiter.Allow(ctx, "key")
@@ -232,7 +232,7 @@ func TestFixedWindow_OnResult(t *testing.T) {
 	var calls []Result
 	var keys []string
 	var gotTraces []any
-	limiter := New(
+	limiter := mustNew(t,
 		WithRate(2, time.Minute),
 		WithOnResult(func(cbCtx context.Context, key string, result Result) {
 			calls = append(calls, result)

@@ -236,7 +236,7 @@ func (s *MemoryStore) CheckAndConsumeTokens(ctx context.Context, key string, cap
 	defer s.mu.Unlock()
 
 	now := s.now()
-	emissionInterval := window.Period / time.Duration(window.Rate)
+	emissionInterval := window.EmissionInterval()
 
 	e, ok := s.tokens[key]
 	if !ok {
@@ -286,7 +286,7 @@ func (s *MemoryStore) CheckAndAdvanceTAT(ctx context.Context, key string, burst 
 	defer s.mu.Unlock()
 
 	now := s.now()
-	emissionInterval := window.Period / time.Duration(window.Rate)
+	emissionInterval := window.EmissionInterval()
 	delayTolerance := time.Duration(burst) * emissionInterval
 
 	tat := now

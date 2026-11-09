@@ -13,7 +13,7 @@ import (
 )
 
 func TestUnaryServerInterceptor_Allow(t *testing.T) {
-	limiter := ratelimit.New(ratelimit.WithRate(5, time.Minute))
+	limiter := mustNew(t, ratelimit.WithRate(5, time.Minute))
 	interceptor := UnaryServerInterceptor(limiter)
 
 	ctx := trailerCtx()
@@ -35,7 +35,7 @@ func TestUnaryServerInterceptor_Allow(t *testing.T) {
 }
 
 func TestUnaryServerInterceptor_Deny(t *testing.T) {
-	limiter := ratelimit.New(ratelimit.WithRate(1, time.Minute))
+	limiter := mustNew(t, ratelimit.WithRate(1, time.Minute))
 	interceptor := UnaryServerInterceptor(limiter)
 
 	ctx := trailerCtx()
@@ -61,7 +61,7 @@ func TestUnaryServerInterceptor_Deny(t *testing.T) {
 }
 
 func TestUnaryServerInterceptor_CustomKeyFunc(t *testing.T) {
-	limiter := ratelimit.New(ratelimit.WithRate(1, time.Minute))
+	limiter := mustNew(t, ratelimit.WithRate(1, time.Minute))
 	interceptor := UnaryServerInterceptor(limiter, WithKeyFunc(func(_ context.Context, info *grpc.UnaryServerInfo) string {
 		return info.FullMethod
 	}))
@@ -139,7 +139,7 @@ func TestUnaryServerInterceptor_CustomErrorHandler(t *testing.T) {
 }
 
 func TestStreamServerInterceptor_Allow(t *testing.T) {
-	limiter := ratelimit.New(ratelimit.WithRate(5, time.Minute))
+	limiter := mustNew(t, ratelimit.WithRate(5, time.Minute))
 	interceptor := StreamServerInterceptor(limiter)
 
 	ctx := trailerCtx()
@@ -159,7 +159,7 @@ func TestStreamServerInterceptor_Allow(t *testing.T) {
 }
 
 func TestStreamServerInterceptor_Deny(t *testing.T) {
-	limiter := ratelimit.New(ratelimit.WithRate(1, time.Minute))
+	limiter := mustNew(t, ratelimit.WithRate(1, time.Minute))
 	interceptor := StreamServerInterceptor(limiter)
 
 	ctx := trailerCtx()
@@ -187,7 +187,7 @@ func TestStreamServerInterceptor_Deny(t *testing.T) {
 }
 
 func TestStreamServerInterceptorN(t *testing.T) {
-	limiter := ratelimit.New(ratelimit.WithRate(10, time.Minute))
+	limiter := mustNew(t, ratelimit.WithRate(10, time.Minute))
 	costFn := func(_ context.Context, info *grpc.UnaryServerInfo) int64 {
 		if info.FullMethod == "/test.Service/HeavyStream" {
 			return 5
@@ -220,7 +220,7 @@ func TestStreamServerInterceptorN(t *testing.T) {
 }
 
 func TestUnaryServerInterceptorN(t *testing.T) {
-	limiter := ratelimit.New(ratelimit.WithRate(10, time.Minute))
+	limiter := mustNew(t, ratelimit.WithRate(10, time.Minute))
 	costFn := func(_ context.Context, info *grpc.UnaryServerInfo) int64 {
 		if info.FullMethod == "/test.Service/Heavy" {
 			return 5

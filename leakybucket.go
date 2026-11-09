@@ -14,18 +14,23 @@ import (
 // Behaviorally equivalent to tokenBucket with the same parameters, but with
 // single-field state — one timestamp instead of token count + lastRefill.
 type leakyBucket struct {
-	window   Window
-	burst    int64
-	store    Store
-	onResult OnResultFunc
+	window    Window
+	burst     int64
+	emission  time.Duration
+	tolerance time.Duration
+	store     Store
+	onResult  OnResultFunc
 }
 
 func newLeakyBucket(window Window, burst int64, store Store, onResult OnResultFunc) *leakyBucket {
+	emission := window.EmissionInterval()
 	return &leakyBucket{
-		window:   window,
-		burst:    burst,
-		store:    store,
-		onResult: onResult,
+		window:    window,
+		burst:     burst,
+		emission:  emission,
+		tolerance: time.Duration(burst) * emission,
+		store:     store,
+		onResult:  onResult,
 	}
 }
 
@@ -39,17 +44,14 @@ func (lb *leakyBucket) AllowN(ctx context.Context, key string, n int64) (Result,
 		return Result{}, err
 	}
 
-	emissionInterval := lb.window.Period / time.Duration(lb.window.Rate)
-	tolerance := time.Duration(lb.burst) * emissionInterval
-
 	result := Result{
 		Allowed: applied,
 		Limit:   lb.burst,
 	}
 	if applied {
-		result.Remaining = int64((tolerance - delay) / emissionInterval)
+		result.Remaining = int64((lb.tolerance - delay) / lb.emission)
 	} else {
-		result.RetryAfter = delay - tolerance
+		result.RetryAfter = delay - lb.tolerance
 		if result.RetryAfter < 0 {
 			result.RetryAfter = 0
 		}

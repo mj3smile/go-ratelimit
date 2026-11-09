@@ -37,7 +37,7 @@ func TestLeakyBucket_Allow(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			limiter := New(tt.opts...)
+			limiter := mustNew(t, tt.opts...)
 			for i := 0; i < tt.requests; i++ {
 				result, err := limiter.Allow(ctx, "test-key")
 				if err != nil {
@@ -92,7 +92,7 @@ func TestLeakyBucket_AllowN(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			limiter := New(
+			limiter := mustNew(t,
 				WithAlgorithm(LeakyBucket),
 				WithRate(tt.rate, time.Minute),
 				WithBurst(tt.burst),
@@ -207,10 +207,38 @@ func TestLeakyBucket_RetryAfter(t *testing.T) {
 	}
 }
 
+func TestLeakyBucket_RetryAfterAtLargestBurst(t *testing.T) {
+	ctx := context.Background()
+
+	store := NewMemoryStore()
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+
+	// 1/day with the largest burst New accepts: 53,375 days to refill. A second
+	// full burst puts the bucket 106,750 days behind, which must fit in a Duration.
+	limiter := mustNew(t,
+		WithAlgorithm(LeakyBucket),
+		WithRate(1, 24*time.Hour),
+		WithBurst(53_375),
+		WithStore(store),
+	)
+
+	if r, _ := limiter.AllowN(ctx, "k", 53_375); !r.Allowed {
+		t.Fatal("first full burst should be allowed")
+	}
+	r, _ := limiter.AllowN(ctx, "k", 53_375)
+	if r.Allowed {
+		t.Fatal("second full burst should be denied")
+	}
+	if want := 53_375 * 24 * time.Hour; r.RetryAfter != want {
+		t.Errorf("RetryAfter = %v, want %v", r.RetryAfter, want)
+	}
+}
+
 func TestLeakyBucket_Reset(t *testing.T) {
 	ctx := context.Background()
 
-	limiter := New(WithAlgorithm(LeakyBucket), WithRate(1, time.Minute))
+	limiter := mustNew(t, WithAlgorithm(LeakyBucket), WithRate(1, time.Minute))
 
 	r, _ := limiter.Allow(ctx, "k")
 	if !r.Allowed {
@@ -238,7 +266,7 @@ func TestLeakyBucket_OnResult(t *testing.T) {
 	var calls int
 	var gotKey string
 	var gotTrace any
-	limiter := New(
+	limiter := mustNew(t,
 		WithAlgorithm(LeakyBucket),
 		WithRate(1, time.Minute),
 		WithOnResult(func(cbCtx context.Context, key string, result Result) {
@@ -262,7 +290,7 @@ func TestLeakyBucket_OnResult(t *testing.T) {
 func TestLeakyBucket_SeparateKeys(t *testing.T) {
 	ctx := context.Background()
 
-	limiter := New(WithAlgorithm(LeakyBucket), WithRate(1, time.Minute))
+	limiter := mustNew(t, WithAlgorithm(LeakyBucket), WithRate(1, time.Minute))
 
 	r, _ := limiter.Allow(ctx, "a")
 	if !r.Allowed {

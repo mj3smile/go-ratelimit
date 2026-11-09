@@ -77,7 +77,7 @@ func (s *Store) CheckAndConsumeTokens(ctx context.Context, key string, capacity 
 	rk := s.redisKey(key, "tb")
 
 	res, err := tokenBucketScript.Run(ctx, s.client, []string{rk},
-		capacity, emissionMicros(window), n,
+		capacity, window.EmissionInterval().Microseconds(), n,
 	).Int64Slice()
 	if err != nil {
 		return 0, 0, false, fmt.Errorf("redisstore: token bucket script: %w", err)
@@ -91,7 +91,7 @@ func (s *Store) CheckAndAdvanceTAT(ctx context.Context, key string, burst int64,
 	rk := s.redisKey(key, "gcra")
 
 	res, err := gcraScript.Run(ctx, s.client, []string{rk},
-		burst, emissionMicros(window), n,
+		burst, window.EmissionInterval().Microseconds(), n,
 	).Int64Slice()
 	if err != nil {
 		return 0, false, fmt.Errorf("redisstore: gcra script: %w", err)
@@ -99,10 +99,6 @@ func (s *Store) CheckAndAdvanceTAT(ctx context.Context, key string, burst int64,
 
 	delay := time.Duration(res[0]) * time.Microsecond
 	return delay, res[1] == 1, nil
-}
-
-func emissionMicros(window ratelimit.Window) int64 {
-	return (window.Period / time.Duration(window.Rate)).Microseconds()
 }
 
 func (s *Store) ResetFixed(ctx context.Context, key string) error {

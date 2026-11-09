@@ -34,7 +34,7 @@ func TestSlidingWindow_Allow(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			limiter := New(WithAlgorithm(SlidingWindow), WithRate(tt.rate, time.Minute))
+			limiter := mustNew(t, WithAlgorithm(SlidingWindow), WithRate(tt.rate, time.Minute))
 
 			for i := 0; i < tt.requests; i++ {
 				result, err := limiter.Allow(ctx, "test-key")
@@ -92,7 +92,7 @@ func TestSlidingWindow_AllowN(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			limiter := New(WithAlgorithm(SlidingWindow), WithRate(tt.rate, time.Minute))
+			limiter := mustNew(t, WithAlgorithm(SlidingWindow), WithRate(tt.rate, time.Minute))
 			for i, n := range tt.calls {
 				result, _ := limiter.AllowN(ctx, "k", n)
 				if result.Allowed != tt.wantAllowed[i] {
@@ -186,7 +186,7 @@ func TestSlidingWindow_RetryAfter(t *testing.T) {
 func TestSlidingWindow_Reset(t *testing.T) {
 	ctx := context.Background()
 
-	limiter := New(WithAlgorithm(SlidingWindow), WithRate(1, time.Minute))
+	limiter := mustNew(t, WithAlgorithm(SlidingWindow), WithRate(1, time.Minute))
 
 	limiter.Allow(ctx, "k")
 	r, _ := limiter.Allow(ctx, "k")
@@ -210,7 +210,7 @@ func TestSlidingWindow_OnResult(t *testing.T) {
 
 	var calls int
 	var gotTrace any
-	limiter := New(
+	limiter := mustNew(t,
 		WithAlgorithm(SlidingWindow),
 		WithRate(1, time.Minute),
 		WithOnResult(func(cbCtx context.Context, key string, result Result) {
