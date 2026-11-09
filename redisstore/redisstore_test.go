@@ -2,7 +2,10 @@ package redisstore
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -534,5 +537,74 @@ func TestRedisStore_FractionalEmission(t *testing.T) {
 	}
 	if ttl := client.PTTL(ctx, store.redisKey("gcra", "gcra")).Val(); ttl <= 0 {
 		t.Errorf("gcra: expected a positive TTL, got %v", ttl)
+	}
+}
+
+// --- Redis clock ---
+
+// Concurrent callers on one host reach Redis in a different order than they
+// read their clocks. Scripts that took the time from the caller saw it move
+// backwards, so token counts and the sliding window's elapsed time went negative.
+func TestRedisStore_ConcurrentCallersNeverGoBackInTime(t *testing.T) {
+	store, _ := newStore(t)
+	ctx := context.Background()
+	tokenWindow := ratelimit.Window{Rate: 1000, Period: time.Second}
+	slidingWindow := ratelimit.Window{Rate: 50, Period: 20 * time.Millisecond}
+
+	var errs, negativeTokens, negativeElapsed atomic.Int64
+	var wg sync.WaitGroup
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for range 32 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for time.Now().Before(deadline) {
+				tokens, since, _, err := store.CheckAndConsumeTokens(ctx, "tb", 5, tokenWindow, 1)
+				if err != nil {
+					errs.Add(1)
+				} else if tokens < 0 || since < 0 {
+					negativeTokens.Add(1)
+				}
+				_, _, elapsed, _, err := store.CheckAndIncrementSliding(ctx, "sw", slidingWindow, 1)
+				if err != nil {
+					errs.Add(1)
+				} else if elapsed < 0 {
+					negativeElapsed.Add(1)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	if n := errs.Load(); n > 0 {
+		t.Fatalf("%d store calls failed", n)
+	}
+	if n := negativeTokens.Load(); n > 0 {
+		t.Errorf("token bucket: %d results with negative tokens or time since refill", n)
+	}
+	if n := negativeElapsed.Load(); n > 0 {
+		t.Errorf("sliding window: %d results with negative elapsed time", n)
+	}
+}
+
+// At 7/s the time between requests is 142.857...ms. Adding that fraction to
+// millisecond timestamps rounded at every step, so the last request of a full
+// burst could be denied.
+func TestRedisStore_CheckAndAdvanceTAT_FullBurst(t *testing.T) {
+	store, _ := newStore(t)
+	ctx := context.Background()
+	window := ratelimit.Window{Rate: 7, Period: time.Second}
+
+	for k := range 20 {
+		key := fmt.Sprintf("key-%d", k)
+		for i := range 7 {
+			_, applied, err := store.CheckAndAdvanceTAT(ctx, key, 7, window, 1)
+			if err != nil {
+				t.Fatalf("%s request %d: %v", key, i+1, err)
+			}
+			if !applied {
+				t.Fatalf("%s: request %d of a burst of 7 was denied", key, i+1)
+			}
+		}
 	}
 }
