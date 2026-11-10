@@ -31,9 +31,8 @@ type gcraEntry struct {
 // It is safe for concurrent use and suitable for single-instance deployments
 // or testing.
 //
-// Expired keys are cleaned up by a background goroutine using a min-heap,
-// so only actually-expired keys are touched on each sweep (no full-map scan).
-// Call Close to stop the goroutine when the store is no longer needed.
+// Expired keys are removed during normal calls, oldest first, using a
+// min-heap of expiry times.
 type MemoryStore struct {
 	mu      sync.Mutex
 	entries map[string]*entry
@@ -42,70 +41,24 @@ type MemoryStore struct {
 	gcra    map[string]*gcraEntry
 	now     func() time.Time // for testing
 
-	eh        expiryHeap
-	lookup    map[heapKey]*heapItem
-	stopCh    chan struct{}
-	closeOnce sync.Once
+	eh     expiryHeap
+	lookup map[heapKey]*heapItem
 }
 
-// MemoryStoreOption configures a MemoryStore.
-type MemoryStoreOption func(*memoryStoreConfig)
+// Each call removes up to this many expired keys. A call adds at most one
+// key, so removing two keeps the store from growing past its busiest point.
+const removePerCall = 2
 
-type memoryStoreConfig struct {
-	sweepInterval time.Duration
-}
-
-// WithSweepInterval sets how often the background goroutine checks for
-// expired keys. Default is 1 minute. Set to 0 to disable the background
-// sweep (useful for testing with manual deleteExpired calls).
-func WithSweepInterval(d time.Duration) MemoryStoreOption {
-	return func(c *memoryStoreConfig) {
-		c.sweepInterval = d
-	}
-}
-
-// NewMemoryStore creates a new in-memory store with a background goroutine
-// that cleans up expired keys. Call Close to stop the goroutine.
-func NewMemoryStore(opts ...MemoryStoreOption) *MemoryStore {
-	cfg := memoryStoreConfig{sweepInterval: time.Minute}
-	for _, opt := range opts {
-		opt(&cfg)
-	}
-
-	s := &MemoryStore{
+// NewMemoryStore creates a new in-memory store.
+func NewMemoryStore() *MemoryStore {
+	return &MemoryStore{
 		entries: make(map[string]*entry),
 		sliding: make(map[string]*slidingEntry),
 		tokens:  make(map[string]*tokenEntry),
 		gcra:    make(map[string]*gcraEntry),
 		eh:      make(expiryHeap, 0),
 		lookup:  make(map[heapKey]*heapItem),
-		stopCh:  make(chan struct{}),
 		now:     time.Now,
-	}
-	if cfg.sweepInterval > 0 {
-		go s.sweep(cfg.sweepInterval)
-	}
-	return s
-}
-
-// Close stops the background sweep goroutine. It is safe to call multiple
-// times.
-func (s *MemoryStore) Close() {
-	s.closeOnce.Do(func() {
-		close(s.stopCh)
-	})
-}
-
-func (s *MemoryStore) sweep(interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ticker.C:
-			s.deleteExpired()
-		case <-s.stopCh:
-			return
-		}
 	}
 }
 
@@ -124,13 +77,12 @@ func (s *MemoryStore) touchKey(key string, mt mapType, ttl time.Duration) {
 	heap.Push(&s.eh, item)
 }
 
-func (s *MemoryStore) deleteExpired() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	now := s.now()
-	for s.eh.Len() > 0 {
-		if s.eh[0].expiry.After(now) {
-			break
+// removeExpired deletes up to limit expired keys, oldest first. Must be
+// called while s.mu is held.
+func (s *MemoryStore) removeExpired(now time.Time, limit int) {
+	for range limit {
+		if s.eh.Len() == 0 || s.eh[0].expiry.After(now) {
+			return
 		}
 		item := heap.Pop(&s.eh).(*heapItem)
 		delete(s.lookup, heapKey{mt: item.mt, key: item.key})
@@ -161,6 +113,7 @@ func (s *MemoryStore) CheckAndIncrement(ctx context.Context, key string, window 
 	defer s.mu.Unlock()
 
 	now := s.now()
+	s.removeExpired(now, removePerCall)
 	e, ok := s.entries[key]
 	if !ok || !now.Before(e.expiresAt) {
 		if n > window.Rate {
@@ -190,6 +143,7 @@ func (s *MemoryStore) CheckAndIncrementSliding(ctx context.Context, key string, 
 
 	ttl := 2 * window.Period
 	now := s.now()
+	s.removeExpired(now, removePerCall)
 	e, ok := s.sliding[key]
 	if !ok {
 		if n > window.Rate {
@@ -236,6 +190,7 @@ func (s *MemoryStore) CheckAndConsumeTokens(ctx context.Context, key string, cap
 	defer s.mu.Unlock()
 
 	now := s.now()
+	s.removeExpired(now, removePerCall)
 	emissionInterval := window.EmissionInterval()
 
 	e, ok := s.tokens[key]
@@ -289,6 +244,7 @@ func (s *MemoryStore) CheckAndAdvanceTAT(ctx context.Context, key string, burst 
 	defer s.mu.Unlock()
 
 	now := s.now()
+	s.removeExpired(now, removePerCall)
 	emissionInterval := window.EmissionInterval()
 	delayTolerance := time.Duration(burst) * emissionInterval
 

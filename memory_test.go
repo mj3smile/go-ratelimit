@@ -2,6 +2,8 @@ package ratelimit
 
 import (
 	"context"
+	"math"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -89,7 +91,7 @@ func TestMemoryStore_ResetByAlgorithm(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			store := NewMemoryStore(WithSweepInterval(0))
+			store := NewMemoryStore()
 			store.CheckAndIncrement(ctx, "key", window, 1)
 			store.CheckAndIncrementSliding(ctx, "key", window, 1)
 			store.CheckAndConsumeTokens(ctx, "key", 10, window, 1)
@@ -569,7 +571,7 @@ func TestMemoryStore_CheckAndAdvanceTAT_ConcurrentAccess(t *testing.T) {
 
 func TestMemoryStore_Expiry(t *testing.T) {
 	ctx := context.Background()
-	store := NewMemoryStore(WithSweepInterval(0))
+	store := NewMemoryStore()
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	store.now = func() time.Time { return now }
 	window := Window{Rate: 10, Period: time.Minute}
@@ -585,7 +587,7 @@ func TestMemoryStore_Expiry(t *testing.T) {
 
 	// Advance past the longest TTL (sliding window's 2 * period).
 	now = now.Add(3 * time.Minute)
-	store.deleteExpired()
+	store.removeExpired(now, math.MaxInt)
 
 	if store.eh.Len() != 0 {
 		t.Errorf("heap len after expiry = %d, want 0", store.eh.Len())
@@ -606,7 +608,7 @@ func TestMemoryStore_Expiry(t *testing.T) {
 
 func TestMemoryStore_Expiry_TouchRefreshes(t *testing.T) {
 	ctx := context.Background()
-	store := NewMemoryStore(WithSweepInterval(0))
+	store := NewMemoryStore()
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	store.now = func() time.Time { return now }
 	window := Window{Rate: 2, Period: time.Minute} // emission interval = 30s
@@ -626,7 +628,7 @@ func TestMemoryStore_Expiry_TouchRefreshes(t *testing.T) {
 
 	// At t=1m15s only fixed window has expired.
 	now = now.Add(30 * time.Second)
-	store.deleteExpired()
+	store.removeExpired(now, math.MaxInt)
 
 	if len(store.entries) != 0 {
 		t.Errorf("entries map len = %d, want 0 (fixed window TTL is not refreshed)", len(store.entries))
@@ -642,7 +644,7 @@ func TestMemoryStore_Expiry_TouchRefreshes(t *testing.T) {
 	}
 
 	now = now.Add(3 * time.Minute)
-	store.deleteExpired()
+	store.removeExpired(now, math.MaxInt)
 
 	if len(store.sliding) != 0 {
 		t.Errorf("sliding map len = %d, want 0 (expired)", len(store.sliding))
@@ -657,7 +659,7 @@ func TestMemoryStore_Expiry_TouchRefreshes(t *testing.T) {
 
 func TestMemoryStore_Expiry_ResetCleansHeap(t *testing.T) {
 	ctx := context.Background()
-	store := NewMemoryStore(WithSweepInterval(0))
+	store := NewMemoryStore()
 	window := Window{Rate: 10, Period: time.Minute}
 
 	store.CheckAndIncrement(ctx, "k", window, 1)
@@ -676,7 +678,7 @@ func TestMemoryStore_Expiry_ResetCleansHeap(t *testing.T) {
 
 func TestMemoryStore_Expiry_OnlyExpiredRemoved(t *testing.T) {
 	ctx := context.Background()
-	store := NewMemoryStore(WithSweepInterval(0))
+	store := NewMemoryStore()
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	store.now = func() time.Time { return now }
 
@@ -688,7 +690,7 @@ func TestMemoryStore_Expiry_OnlyExpiredRemoved(t *testing.T) {
 
 	// Advance 2m — past short's TTL (60s) but before long's TTL (10m).
 	now = now.Add(2 * time.Minute)
-	store.deleteExpired()
+	store.removeExpired(now, math.MaxInt)
 
 	if len(store.entries) != 1 {
 		t.Errorf("entries map len = %d, want 1", len(store.entries))
@@ -698,5 +700,48 @@ func TestMemoryStore_Expiry_OnlyExpiredRemoved(t *testing.T) {
 	}
 	if _, ok := store.entries["short"]; ok {
 		t.Error("short-window key should be expired")
+	}
+}
+
+// Every kind of call cleans up expired keys as it goes, at least two per
+// call, so the store shrinks back once traffic moves on to other keys.
+func TestMemoryStore_CallsRemoveExpiredKeys(t *testing.T) {
+	ctx := context.Background()
+	window := Window{Rate: 10, Period: time.Minute}
+	calls := []struct {
+		name string
+		call func(s *MemoryStore, key string)
+	}{
+		{"CheckAndIncrement", func(s *MemoryStore, key string) { s.CheckAndIncrement(ctx, key, window, 1) }},
+		{"CheckAndIncrementSliding", func(s *MemoryStore, key string) { s.CheckAndIncrementSliding(ctx, key, window, 1) }},
+		{"CheckAndConsumeTokens", func(s *MemoryStore, key string) { s.CheckAndConsumeTokens(ctx, key, 10, window, 1) }},
+		{"CheckAndAdvanceTAT", func(s *MemoryStore, key string) { s.CheckAndAdvanceTAT(ctx, key, 10, window, 1) }},
+	}
+
+	for _, c := range calls {
+		t.Run(c.name, func(t *testing.T) {
+			store := NewMemoryStore()
+			now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+			store.now = func() time.Time { return now }
+			for i := 0; i < 10; i++ {
+				store.CheckAndIncrement(ctx, "old"+strconv.Itoa(i), window, 1)
+			}
+
+			// All ten have expired. Five calls on other keys should remove them.
+			now = now.Add(2 * time.Minute)
+			for i := 0; i < 5; i++ {
+				c.call(store, "new"+strconv.Itoa(i))
+			}
+
+			left := 0
+			for i := 0; i < 10; i++ {
+				if _, ok := store.entries["old"+strconv.Itoa(i)]; ok {
+					left++
+				}
+			}
+			if left != 0 {
+				t.Errorf("%d of 10 expired keys left after 5 calls, want 0", left)
+			}
+		})
 	}
 }
