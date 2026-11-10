@@ -2,6 +2,7 @@ package ratelimit
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -42,12 +43,20 @@ type Result struct {
 	Remaining int64
 
 	// RetryAfter indicates how long the caller should wait before retrying.
-	// Zero when Allowed is true.
+	// Zero when Allowed is true. InfDuration when the request costs more than
+	// the limit and can never be allowed.
 	RetryAfter time.Duration
 
 	// Limit is the maximum number of requests allowed in the window.
 	Limit int64
 }
+
+// InfDuration is the RetryAfter of a request that costs more than the limit,
+// so it can never be allowed.
+const InfDuration = time.Duration(math.MaxInt64)
+
+// ErrInvalidCost is returned, wrapped, by AllowN for a negative cost.
+var ErrInvalidCost = errors.New("ratelimit: cost must not be negative")
 
 // Window describes a rate limit window.
 type Window struct {
@@ -82,10 +91,39 @@ type Limiter interface {
 
 	// AllowN checks whether n requests for the given key are within the rate limit.
 	// Use this for weighted requests where some operations cost more than others.
+	//
+	// A cost of 0 is always allowed and consumes nothing. A cost larger than the
+	// limit (Result.Limit) is denied without consuming anything, with RetryAfter
+	// set to InfDuration. A negative cost returns an error wrapping ErrInvalidCost.
 	AllowN(ctx context.Context, key string, n int64) (Result, error)
 
 	// Reset clears the rate limit state for the given key.
 	Reset(ctx context.Context, key string) error
+}
+
+// allowN applies AllowN's cost rules around check, which runs one algorithm for
+// a cost between 0 and limit. A cost above the limit is checked with a cost of
+// 0, which reads the key's state without consuming anything, and then denied.
+func allowN(ctx context.Context, key string, n, limit int64, check func(context.Context, string, int64) (Result, error), onResult OnResultFunc) (Result, error) {
+	if n < 0 {
+		return Result{}, fmt.Errorf("%w, got %d", ErrInvalidCost, n)
+	}
+	oversized := n > limit
+	if oversized {
+		n = 0
+	}
+	result, err := check(ctx, key, n)
+	if err != nil {
+		return Result{}, err
+	}
+	if oversized {
+		result.Allowed = false
+		result.RetryAfter = InfDuration
+	}
+	if onResult != nil {
+		onResult(ctx, key, result)
+	}
+	return result, nil
 }
 
 // Store is the storage backend interface for rate limit state.

@@ -35,6 +35,10 @@ func (sw *slidingWindow) Allow(ctx context.Context, key string) (Result, error) 
 }
 
 func (sw *slidingWindow) AllowN(ctx context.Context, key string, n int64) (Result, error) {
+	return allowN(ctx, key, n, sw.window.Rate, sw.check, sw.onResult)
+}
+
+func (sw *slidingWindow) check(ctx context.Context, key string, n int64) (Result, error) {
 	curr, prev, elapsed, applied, err := sw.store.CheckAndIncrementSliding(ctx, key, sw.window, n)
 	if err != nil {
 		return Result{}, err
@@ -58,10 +62,6 @@ func (sw *slidingWindow) AllowN(ctx context.Context, key string, n int64) (Resul
 	}
 	if !applied {
 		result.RetryAfter = sw.retryAfter(curr, prev, elapsed, n)
-	}
-
-	if sw.onResult != nil {
-		sw.onResult(ctx, key, result)
 	}
 	return result, nil
 }

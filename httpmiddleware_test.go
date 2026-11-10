@@ -74,6 +74,33 @@ func TestHTTPMiddleware_Deny(t *testing.T) {
 	}
 }
 
+func TestHTTPMiddlewareN_CostAboveLimit(t *testing.T) {
+	limiter := mustNew(t, WithRate(10, time.Minute))
+	handler := HTTPMiddlewareN(limiter, func(*http.Request) int64 { return 11 })(newTestHandler())
+
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	req.RemoteAddr = "10.0.0.1:1234"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", rec.Code)
+	}
+	if got := rec.Header().Get("Retry-After"); got != "" {
+		t.Errorf("Retry-After = %q, want none: the request can never be allowed", got)
+	}
+	if got := rec.Header().Get("X-RateLimit-Remaining"); got != "10" {
+		t.Errorf("X-RateLimit-Remaining = %q, want %q", got, "10")
+	}
+	var body map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode JSON body: %v", err)
+	}
+	if got, ok := body["retry_after"]; ok {
+		t.Errorf("body retry_after = %q, want none", got)
+	}
+}
+
 func TestHTTPMiddleware_CustomDeniedHandler(t *testing.T) {
 	limiter := mustNew(t, WithRate(1, time.Minute))
 	custom := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

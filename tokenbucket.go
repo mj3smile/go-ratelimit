@@ -39,6 +39,10 @@ func (tb *tokenBucket) Allow(ctx context.Context, key string) (Result, error) {
 }
 
 func (tb *tokenBucket) AllowN(ctx context.Context, key string, n int64) (Result, error) {
+	return allowN(ctx, key, n, tb.capacity, tb.check, tb.onResult)
+}
+
+func (tb *tokenBucket) check(ctx context.Context, key string, n int64) (Result, error) {
 	tokens, sinceLastRefill, applied, err := tb.store.CheckAndConsumeTokens(ctx, key, tb.capacity, tb.window, n)
 	if err != nil {
 		return Result{}, err
@@ -51,10 +55,6 @@ func (tb *tokenBucket) AllowN(ctx context.Context, key string, n int64) (Result,
 	}
 	if !applied {
 		result.RetryAfter = tb.retryAfter(tokens, sinceLastRefill, n)
-	}
-
-	if tb.onResult != nil {
-		tb.onResult(ctx, key, result)
 	}
 	return result, nil
 }

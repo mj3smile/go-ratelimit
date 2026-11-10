@@ -39,6 +39,10 @@ func (lb *leakyBucket) Allow(ctx context.Context, key string) (Result, error) {
 }
 
 func (lb *leakyBucket) AllowN(ctx context.Context, key string, n int64) (Result, error) {
+	return allowN(ctx, key, n, lb.burst, lb.check, lb.onResult)
+}
+
+func (lb *leakyBucket) check(ctx context.Context, key string, n int64) (Result, error) {
 	delay, applied, err := lb.store.CheckAndAdvanceTAT(ctx, key, lb.burst, lb.window, n)
 	if err != nil {
 		return Result{}, err
@@ -55,10 +59,6 @@ func (lb *leakyBucket) AllowN(ctx context.Context, key string, n int64) (Result,
 		if result.RetryAfter < 0 {
 			result.RetryAfter = 0
 		}
-	}
-
-	if lb.onResult != nil {
-		lb.onResult(ctx, key, result)
 	}
 	return result, nil
 }

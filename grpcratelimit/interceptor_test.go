@@ -251,3 +251,17 @@ func TestUnaryServerInterceptorN(t *testing.T) {
 		t.Errorf("code = %v, want ResourceExhausted", st.Code())
 	}
 }
+
+func TestUnaryServerInterceptorN_CostAboveLimit(t *testing.T) {
+	limiter := mustNew(t, ratelimit.WithRate(10, time.Minute))
+	interceptor := UnaryServerInterceptorN(limiter, func(context.Context, *grpc.UnaryServerInfo) int64 { return 11 })
+
+	ctx := trailerCtx()
+	_, err := interceptor(ctx, "req", testInfo, testHandler)
+	if code := status.Code(err); code != codes.ResourceExhausted {
+		t.Fatalf("code = %v, want ResourceExhausted", code)
+	}
+	if got := getTrailers(ctx).Get("retry-after"); len(got) != 0 {
+		t.Errorf("retry-after = %v, want none: the RPC can never be allowed", got)
+	}
+}

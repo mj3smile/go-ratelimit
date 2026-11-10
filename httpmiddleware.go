@@ -48,7 +48,8 @@ func WithKeyFunc(fn KeyFunc) MiddlewareOption {
 }
 
 // WithDeniedHandler sets a custom handler invoked when a request is denied.
-// The default responds with 429, a Retry-After header, and a JSON body.
+// The rate-limit headers, including Retry-After when there is one, are already
+// set when it runs. The default responds with 429 and a JSON body.
 func WithDeniedHandler(h http.Handler) MiddlewareOption {
 	return func(c *middlewareConfig) {
 		c.deniedHandler = h
@@ -93,19 +94,23 @@ func HTTPMiddleware(limiter Limiter, opts ...MiddlewareOption) func(http.Handler
 }
 
 func defaultDeniedHandler(w http.ResponseWriter, _ *http.Request) {
+	body := map[string]string{"error": "rate limit exceeded"}
+	if retryAfter := w.Header().Get("Retry-After"); retryAfter != "" {
+		body["retry_after"] = retryAfter + "s"
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusTooManyRequests)
-	json.NewEncoder(w).Encode(map[string]string{
-		"error":       "rate limit exceeded",
-		"retry_after": w.Header().Get("Retry-After") + "s",
-	})
+	json.NewEncoder(w).Encode(body)
 }
 
 // CostFunc determines the cost of an HTTP request for weighted rate limiting.
 type CostFunc func(r *http.Request) int64
 
 // HTTPMiddlewareN returns a middleware that uses AllowN with a per-request
-// cost. This is useful when different endpoints have different weights.
+// cost. This is useful when different endpoints have different weights. A
+// request whose cost is larger than the limit is denied without a Retry-After
+// header, since it can never be allowed; a negative cost is passed to the
+// error handler as an error wrapping ErrInvalidCost.
 func HTTPMiddlewareN(limiter Limiter, costFn CostFunc, opts ...MiddlewareOption) func(http.Handler) http.Handler {
 	cfg := applyDefaults(opts)
 
@@ -145,7 +150,7 @@ func applyDefaults(opts []MiddlewareOption) middlewareConfig {
 func writeRateLimitHeaders(w http.ResponseWriter, result Result) {
 	w.Header().Set("X-RateLimit-Limit", strconv.FormatInt(result.Limit, 10))
 	w.Header().Set("X-RateLimit-Remaining", strconv.FormatInt(result.Remaining, 10))
-	if !result.Allowed {
+	if !result.Allowed && result.RetryAfter != InfDuration {
 		retryAfterSec := math.Ceil(result.RetryAfter.Seconds())
 		w.Header().Set("Retry-After", strconv.Itoa(int(retryAfterSec)))
 	}

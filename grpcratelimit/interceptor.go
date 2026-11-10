@@ -100,7 +100,7 @@ func setTrailers(ctx context.Context, result ratelimit.Result) {
 		"x-ratelimit-limit", strconv.FormatInt(result.Limit, 10),
 		"x-ratelimit-remaining", strconv.FormatInt(result.Remaining, 10),
 	))
-	if !result.Allowed {
+	if !result.Allowed && result.RetryAfter != ratelimit.InfDuration {
 		retryAfterSec := math.Ceil(result.RetryAfter.Seconds())
 		grpc.SetTrailer(ctx, metadata.Pairs("retry-after", strconv.Itoa(int(retryAfterSec))))
 	}
@@ -110,7 +110,10 @@ func setTrailers(ctx context.Context, result ratelimit.Result) {
 type CostFunc func(ctx context.Context, info *grpc.UnaryServerInfo) int64
 
 // UnaryServerInterceptorN returns a grpc.UnaryServerInterceptor that uses
-// AllowN with a per-RPC cost.
+// AllowN with a per-RPC cost. An RPC whose cost is larger than the limit is
+// denied without a retry-after trailer, since it can never be allowed; a
+// negative cost is passed to the error handler as an error wrapping
+// ratelimit.ErrInvalidCost.
 func UnaryServerInterceptorN(limiter ratelimit.Limiter, costFn CostFunc, opts ...Option) grpc.UnaryServerInterceptor {
 	cfg := applyDefaults(opts)
 
@@ -163,7 +166,8 @@ func StreamServerInterceptor(limiter ratelimit.Limiter, opts ...Option) grpc.Str
 }
 
 // StreamServerInterceptorN returns a grpc.StreamServerInterceptor that uses
-// AllowN with a per-RPC cost.
+// AllowN with a per-RPC cost, with the same handling of costs as
+// UnaryServerInterceptorN.
 func StreamServerInterceptorN(limiter ratelimit.Limiter, costFn CostFunc, opts ...Option) grpc.StreamServerInterceptor {
 	cfg := applyDefaults(opts)
 

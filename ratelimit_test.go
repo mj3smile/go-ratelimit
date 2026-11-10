@@ -1,6 +1,9 @@
 package ratelimit
 
 import (
+	"context"
+	"errors"
+	"math"
 	"testing"
 	"time"
 )
@@ -125,6 +128,63 @@ func TestParseRateString_Invalid(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if _, err := ParseRateString(tt.input); err == nil {
 				t.Errorf("ParseRateString(%q) returned no error", tt.input)
+			}
+		})
+	}
+}
+
+func TestAllowN_CostRules(t *testing.T) {
+	ctx := context.Background()
+	algorithms := []struct {
+		name string
+		algo Algorithm
+	}{
+		{"fixed window", FixedWindow},
+		{"sliding window", SlidingWindow},
+		{"token bucket", TokenBucket},
+		{"leaky bucket", LeakyBucket},
+	}
+
+	for _, a := range algorithms {
+		t.Run(a.name, func(t *testing.T) {
+			var results []Result
+			limiter := mustNew(t,
+				WithAlgorithm(a.algo),
+				PerMinute(5),
+				WithOnResult(func(_ context.Context, _ string, r Result) {
+					results = append(results, r)
+				}),
+			)
+			limiter.Allow(ctx, "k")
+
+			for _, n := range []int64{6, math.MaxInt64} {
+				r, err := limiter.AllowN(ctx, "k", n)
+				if err != nil {
+					t.Fatalf("AllowN(%d): %v", n, err)
+				}
+				if r.Allowed || r.RetryAfter != InfDuration || r.Remaining != 4 {
+					t.Errorf("AllowN(%d) = %+v, want denied with RetryAfter InfDuration and Remaining 4", n, r)
+				}
+			}
+			if r, _ := limiter.AllowN(ctx, "k", 4); !r.Allowed {
+				t.Fatal("AllowN(4) should get the quota the larger costs left untouched")
+			}
+
+			if _, err := limiter.AllowN(ctx, "k", -100); !errors.Is(err, ErrInvalidCost) {
+				t.Errorf("AllowN(-100): err = %v, want ErrInvalidCost", err)
+			}
+			if r, _ := limiter.AllowN(ctx, "k", 0); !r.Allowed || r.Remaining != 0 {
+				t.Errorf("AllowN(0) with no quota left = %+v, want allowed with Remaining 0", r)
+			}
+			if r, _ := limiter.Allow(ctx, "k"); r.Allowed {
+				t.Error("Allow after the quota is used should be denied")
+			}
+
+			if len(results) != 6 {
+				t.Fatalf("OnResult called %d times, want 6 (once per call that returned no error)", len(results))
+			}
+			if results[1].RetryAfter != InfDuration || results[2].RetryAfter != InfDuration {
+				t.Errorf("OnResult for the larger costs got RetryAfter %v and %v, want InfDuration", results[1].RetryAfter, results[2].RetryAfter)
 			}
 		})
 	}

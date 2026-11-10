@@ -24,6 +24,10 @@ func (fw *fixedWindow) Allow(ctx context.Context, key string) (Result, error) {
 }
 
 func (fw *fixedWindow) AllowN(ctx context.Context, key string, n int64) (Result, error) {
+	return allowN(ctx, key, n, fw.window.Rate, fw.check, fw.onResult)
+}
+
+func (fw *fixedWindow) check(ctx context.Context, key string, n int64) (Result, error) {
 	count, resetAfter, applied, err := fw.store.CheckAndIncrement(ctx, key, fw.window, n)
 	if err != nil {
 		return Result{}, err
@@ -37,11 +41,6 @@ func (fw *fixedWindow) AllowN(ctx context.Context, key string, n int64) (Result,
 	if !applied {
 		result.RetryAfter = resetAfter
 	}
-
-	if fw.onResult != nil {
-		fw.onResult(ctx, key, result)
-	}
-
 	return result, nil
 }
 
