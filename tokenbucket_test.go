@@ -182,6 +182,36 @@ func TestTokenBucket_LazyAdvancePreservesFractionalTime(t *testing.T) {
 	}
 }
 
+// A full bucket can't hold another token, so the time it spends full must not
+// count toward the next one.
+func TestTokenBucket_FullBucketEarnsNoCredit(t *testing.T) {
+	ctx := context.Background()
+
+	store := NewMemoryStore()
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+
+	// 1/s with a burst of 1: full again 1s after each request.
+	limiter := newTokenBucket(Window{Rate: 1, Period: time.Second}, 1, store, nil)
+	limiter.Allow(ctx, "k")
+
+	// t=1.9s: full since t=1s.
+	now = now.Add(1900 * time.Millisecond)
+	if r, _ := limiter.Allow(ctx, "k"); !r.Allowed {
+		t.Fatal("at t=1.9s the bucket is full and should allow")
+	}
+
+	// t=2.05s: 150ms after the bucket was drained.
+	now = now.Add(150 * time.Millisecond)
+	r, _ := limiter.Allow(ctx, "k")
+	if r.Allowed {
+		t.Fatal("at t=2.05s, 150ms after draining a bucket that refills once a second, should deny")
+	}
+	if r.RetryAfter != 850*time.Millisecond {
+		t.Errorf("RetryAfter = %v, want 850ms", r.RetryAfter)
+	}
+}
+
 func TestTokenBucket_RetryAfter(t *testing.T) {
 	ctx := context.Background()
 

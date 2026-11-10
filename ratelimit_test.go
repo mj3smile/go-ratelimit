@@ -189,3 +189,29 @@ func TestAllowN_CostRules(t *testing.T) {
 		})
 	}
 }
+
+// A denied request reports what's actually left, the same for every algorithm,
+// since that's what X-RateLimit-Remaining shows.
+func TestAllowN_DeniedReportsRemaining(t *testing.T) {
+	ctx := context.Background()
+	algorithms := []struct {
+		name string
+		algo Algorithm
+	}{
+		{"fixed window", FixedWindow},
+		{"sliding window", SlidingWindow},
+		{"token bucket", TokenBucket},
+		{"leaky bucket", LeakyBucket},
+	}
+
+	for _, a := range algorithms {
+		t.Run(a.name, func(t *testing.T) {
+			limiter := mustNew(t, WithAlgorithm(a.algo), PerMinute(5))
+			limiter.AllowN(ctx, "k", 4)
+
+			if r, _ := limiter.AllowN(ctx, "k", 2); r.Allowed || r.Remaining != 1 {
+				t.Errorf("AllowN(2) with 1 left = %+v, want denied with Remaining 1", r)
+			}
+		})
+	}
+}

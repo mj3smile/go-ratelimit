@@ -150,36 +150,51 @@ func TestSlidingWindow_BucketRotation(t *testing.T) {
 
 func TestSlidingWindow_RetryAfter(t *testing.T) {
 	ctx := context.Background()
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	window := Window{Rate: 10, Period: 10 * time.Second}
 
-	store := NewMemoryStore()
-	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	store.now = func() time.Time { return now }
-
-	limiter := newSlidingWindow(Window{Rate: 10, Period: 10 * time.Second}, store, nil)
-
-	for i := 0; i < 10; i++ {
-		limiter.Allow(ctx, "k")
+	type scenario struct {
+		used int64         // cost used at t=0
+		at   time.Duration // when the request of cost n is denied
+		n    int64
+	}
+	tests := []struct {
+		name string
+		scenario
+	}{
+		{"single request, current bucket full", scenario{used: 10, at: 5 * time.Second, n: 1}},
+		{"weighted request, decays after rotation", scenario{used: 8, at: 5 * time.Second, n: 5}},
+		{"weighted request, decays within the bucket", scenario{used: 10, at: 15 * time.Second, n: 6}},
 	}
 
-	// t=5s: prev=0, curr=10, n=1. Fallback to untilRotation = 5s.
-	now = now.Add(5 * time.Second)
-	r, _ := limiter.Allow(ctx, "k")
-	if r.Allowed {
-		t.Fatal("should be denied")
-	}
-	if r.RetryAfter != 5*time.Second {
-		t.Errorf("RetryAfter = %v, want 5s (prev=0 → fallback to rotation)", r.RetryAfter)
+	// retryAt replays the scenario's denied request, then retries it at t0+d.
+	retryAt := func(s scenario, d time.Duration) (denied, retry Result) {
+		store := NewMemoryStore()
+		now := t0
+		store.now = func() time.Time { return now }
+		limiter := newSlidingWindow(window, store, nil)
+		limiter.AllowN(ctx, "k", s.used)
+		now = t0.Add(s.at)
+		denied, _ = limiter.AllowN(ctx, "k", s.n)
+		now = t0.Add(d)
+		retry, _ = limiter.AllowN(ctx, "k", s.n)
+		return denied, retry
 	}
 
-	// t=15s: rotation. prev=10, curr=0, elapsed=5s. AllowN(6) denied.
-	// budget = 10-6-0 = 4. dt = 10 - 5 - 4*10/10 = 1s.
-	now = now.Add(10 * time.Second)
-	r, _ = limiter.AllowN(ctx, "k", 6)
-	if r.Allowed {
-		t.Fatal("should be denied")
-	}
-	if r.RetryAfter != 1*time.Second {
-		t.Errorf("RetryAfter = %v, want 1s (decay solve)", r.RetryAfter)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			denied, _ := retryAt(tt.scenario, tt.at)
+			if denied.Allowed {
+				t.Fatal("request should be denied")
+			}
+			if _, retry := retryAt(tt.scenario, tt.at+denied.RetryAfter); !retry.Allowed {
+				t.Errorf("RetryAfter = %v, but retrying after that is still denied", denied.RetryAfter)
+			}
+			earlier := max(denied.RetryAfter-10*time.Microsecond, 0)
+			if _, retry := retryAt(tt.scenario, tt.at+earlier); retry.Allowed {
+				t.Errorf("RetryAfter = %v, but a retry after %v is already allowed", denied.RetryAfter, earlier)
+			}
+		})
 	}
 }
 

@@ -11,7 +11,7 @@ import (
 // happened in the trailing Period:
 //
 //	weight   = (Period - elapsed) / Period
-//	estimate = prev*weight + curr
+//	estimate = floor(prev*weight) + curr
 //
 // This smooths out the "burst at the window boundary" problem of fixed window
 // at the cost of a small approximation: it assumes requests in the previous
@@ -70,30 +70,34 @@ func (sw *slidingWindow) Reset(ctx context.Context, key string) error {
 	return sw.store.ResetSliding(ctx, key)
 }
 
-// retryAfter approximates how long until a request of cost n would fit.
+// retryAfter returns how long until a request of cost n would fit.
 //
-// The weighted estimate drops as elapsed grows: prev*(Period-elapsed-dt)/Period.
-// Solving prev*(Period-elapsed-dt)/Period + curr + n <= Rate yields:
+// As the current bucket goes on, the previous bucket's requests fade out of
+// the count, one every timePerRequest. room is how many of them can still be
+// counted while this request fits. The count is rounded down, so a request
+// that has started to fade no longer counts: once mustFade = count-(room+1)
+// have faded completely, the request fits a moment later.
 //
-//	dt = Period - elapsed - (Rate - n - curr)*Period/prev
-//
-// When prev is zero or curr+n already exceeds Rate, the weighted decay alone
-// can't help and the caller must at least wait for the current bucket to rotate.
+// If the current bucket has room, prev is the bucket fading, and it started
+// when the current bucket did, elapsed ago. If curr+n alone is over Rate,
+// nothing fits until the bucket rotates: wait untilRotation, then curr becomes
+// the previous bucket and fades the same way.
 func (sw *slidingWindow) retryAfter(curr, prev int64, elapsed time.Duration, n int64) time.Duration {
-	untilRotation := sw.window.Period - elapsed
-	if prev <= 0 {
-		return untilRotation
+	// +1µs because the request is still denied at exactly mustFade*timePerRequest,
+	// another +1µs for floating-point rounding
+	const extraWait = 2 * time.Microsecond
+
+	period, rate := sw.window.Period, sw.window.Rate
+
+	if room := rate - curr - n; room >= 0 {
+		mustFade := float64(prev - (room + 1))
+		timePerRequest := float64(period) / float64(prev)
+		return max(time.Duration(mustFade*timePerRequest)+extraWait-elapsed, 0)
 	}
-	budget := sw.window.Rate - n - curr
-	if budget < 0 {
-		return untilRotation
-	}
-	dt := sw.window.Period - elapsed - time.Duration(float64(budget)*float64(sw.window.Period)/float64(prev))
-	if dt < 0 {
-		dt = 0
-	}
-	if dt > untilRotation {
-		dt = untilRotation
-	}
-	return dt
+
+	untilRotation := period - elapsed
+	room := rate - n
+	mustFade := float64(curr - (room + 1)) // request that must fade
+	timePerRequest := float64(period) / float64(curr)
+	return untilRotation + time.Duration(mustFade*timePerRequest) + extraWait
 }

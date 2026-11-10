@@ -236,11 +236,13 @@ if now < last_refill then
 end
 
 local refilled = math.floor((now - last_refill) / emission)
-tokens = tokens + refilled
-if tokens > capacity then
+if tokens + refilled >= capacity then
     tokens = capacity
+    last_refill = now
+else
+    tokens = tokens + refilled
+    last_refill = last_refill + refilled * emission
 end
-last_refill = last_refill + refilled * emission
 
 local applied = 0
 if tokens >= n then

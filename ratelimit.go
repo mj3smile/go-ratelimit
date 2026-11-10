@@ -146,7 +146,7 @@ type Store interface {
 	// window.Period:
 	//
 	//	weight   = (window.Period - elapsed) / window.Period
-	//	estimate = prev*weight + curr
+	//	estimate = floor(prev*weight) + curr
 	//
 	// If estimate+n <= window.Rate, the increment is applied to the current
 	// bucket and applied=true. Otherwise applied=false and no state changes.
@@ -171,7 +171,9 @@ type Store interface {
 	//
 	// State uses a "lazy advance" approach: lastRefill is only moved forward
 	// by integer multiples of the emission interval, preserving fractional
-	// refill credit between calls.
+	// refill credit between calls. When a refill fills the bucket, lastRefill
+	// moves to now instead, because a full bucket can't save up time toward
+	// its next token.
 	CheckAndConsumeTokens(ctx context.Context, key string, capacity int64, window Window, n int64) (tokens int64, sinceLastRefill time.Duration, applied bool, err error)
 
 	// CheckAndAdvanceTAT atomically applies a GCRA (Generic Cell Rate
@@ -188,8 +190,8 @@ type Store interface {
 	// If delay > delayTolerance, the request is denied and the TAT is
 	// unchanged. Otherwise the TAT advances to newTAT and applied=true.
 	//
-	// delay is always returned (even on deny) so the caller can compute
-	// Remaining (when allowed) or RetryAfter (when denied).
+	// delay is always returned, even on deny, so the caller can compute
+	// Remaining and, when denied, RetryAfter.
 	CheckAndAdvanceTAT(ctx context.Context, key string, burst int64, window Window, n int64) (delay time.Duration, applied bool, err error)
 
 	// ResetFixed removes the fixed-window state for the given key.

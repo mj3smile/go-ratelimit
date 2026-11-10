@@ -254,14 +254,17 @@ func (s *MemoryStore) CheckAndConsumeTokens(ctx context.Context, key string, cap
 	}
 
 	// Lazy advance: credit only complete emission intervals; carry the
-	// fractional remainder forward by leaving lastRefill behind.
+	// fractional remainder forward by leaving lastRefill behind. A full
+	// bucket earns nothing, so filling it drops the remainder.
 	elapsed := now.Sub(e.lastRefill)
 	refilled := int64(elapsed / emissionInterval)
-	e.tokens += refilled
-	if e.tokens > capacity {
+	if e.tokens+refilled >= capacity {
 		e.tokens = capacity
+		e.lastRefill = now
+	} else {
+		e.tokens += refilled
+		e.lastRefill = e.lastRefill.Add(time.Duration(refilled) * emissionInterval)
 	}
-	e.lastRefill = e.lastRefill.Add(time.Duration(refilled) * emissionInterval)
 
 	applied := false
 	if e.tokens >= n {

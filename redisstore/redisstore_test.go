@@ -361,6 +361,42 @@ func TestRedisStore_CheckAndConsumeTokens_RefillCappedAtCapacity(t *testing.T) {
 	}
 }
 
+// A key normally expires when its bucket fills up. One that outlives that
+// moment must not count the time it spent full toward the next token.
+func TestRedisStore_CheckAndConsumeTokens_FullBucketEarnsNoCredit(t *testing.T) {
+	store, client := newStore(t)
+	ctx := context.Background()
+	limiter, err := ratelimit.New(
+		ratelimit.WithAlgorithm(ratelimit.TokenBucket),
+		ratelimit.PerSecond(10), // a token every 100ms
+		ratelimit.WithBurst(1),
+		ratelimit.WithStore(store),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Drained 190ms ago, so full for the last 90ms, and not yet expired.
+	redisNow, err := client.Time(ctx).Result()
+	if err != nil {
+		t.Fatalf("TIME: %v", err)
+	}
+	rk := store.redisKey("k", "tb")
+	client.HSet(ctx, rk, "tokens", 0, "last_refill", redisNow.Add(-190*time.Millisecond).UnixMicro())
+	client.PExpire(ctx, rk, 10*time.Second)
+
+	if r, _ := limiter.Allow(ctx, "k"); !r.Allowed {
+		t.Fatal("full bucket should allow")
+	}
+	r, _ := limiter.Allow(ctx, "k")
+	if r.Allowed {
+		t.Fatal("just-drained bucket should deny")
+	}
+	if r.RetryAfter < 95*time.Millisecond {
+		t.Errorf("RetryAfter = %v, want about 100ms: the next token is a full interval after draining", r.RetryAfter)
+	}
+}
+
 // --- GCRA ---
 
 func TestRedisStore_CheckAndAdvanceTAT(t *testing.T) {

@@ -15,7 +15,8 @@ import (
 // "lazy advance" approach: lastRefill is only moved forward by integer
 // multiples of the emission interval (Window.EmissionInterval), so fractional
 // refill credit accumulates between calls instead of being lost to integer
-// rounding.
+// rounding. When a refill fills the bucket, lastRefill moves to now instead,
+// because a full bucket can't save up time toward its next token.
 type tokenBucket struct {
 	window   Window
 	capacity int64

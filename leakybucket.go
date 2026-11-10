@@ -48,17 +48,19 @@ func (lb *leakyBucket) check(ctx context.Context, key string, n int64) (Result, 
 		return Result{}, err
 	}
 
-	result := Result{
-		Allowed: applied,
-		Limit:   lb.burst,
+	// delay includes this request's cost, but only an allowed request pays it.
+	used := delay
+	if !applied {
+		used -= time.Duration(n) * lb.emission
 	}
-	if applied {
-		result.Remaining = int64((lb.tolerance - delay) / lb.emission)
-	} else {
-		result.RetryAfter = delay - lb.tolerance
-		if result.RetryAfter < 0 {
-			result.RetryAfter = 0
-		}
+
+	result := Result{
+		Allowed:   applied,
+		Remaining: int64((lb.tolerance - used) / lb.emission),
+		Limit:     lb.burst,
+	}
+	if !applied {
+		result.RetryAfter = max(delay-lb.tolerance, 0)
 	}
 	return result, nil
 }
