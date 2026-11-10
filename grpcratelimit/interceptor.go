@@ -17,7 +17,9 @@ type KeyFunc func(ctx context.Context, info *grpc.UnaryServerInfo) string
 
 // ErrorHandler controls fail-open vs fail-closed behavior when the rate
 // limiter returns an error. Return nil to fail open (allow the RPC), or
-// return an error to fail closed.
+// return an error to fail closed. It isn't called when the RPC's context has
+// already ended: the client has given up, so the RPC ends with codes.Canceled
+// or codes.DeadlineExceeded.
 type ErrorHandler func(ctx context.Context, info *grpc.UnaryServerInfo, err error) error
 
 // FailClosed returns a codes.Internal error when the rate limiter fails.
@@ -40,8 +42,11 @@ type config struct {
 }
 
 // WithKeyFunc sets the function used to extract a rate limit key from each
-// RPC. The default is DefaultKeyFunc.
+// RPC. The default is DefaultKeyFunc. It panics if fn is nil.
 func WithKeyFunc(fn KeyFunc) Option {
+	if fn == nil {
+		panic("grpcratelimit: WithKeyFunc requires a function")
+	}
 	return func(c *config) {
 		c.keyFunc = fn
 	}
@@ -49,8 +54,11 @@ func WithKeyFunc(fn KeyFunc) Option {
 
 // WithErrorHandler sets the function called when the rate limiter returns an
 // error. The default is FailClosed. Use FailOpen to allow RPCs through on
-// error.
+// error. It panics if fn is nil.
 func WithErrorHandler(fn ErrorHandler) Option {
+	if fn == nil {
+		panic("grpcratelimit: WithErrorHandler requires a function")
+	}
 	return func(c *config) {
 		c.errorHandler = fn
 	}
@@ -60,15 +68,15 @@ func WithErrorHandler(fn ErrorHandler) Option {
 // rate-limits incoming unary RPCs using the given Limiter. Every response
 // includes x-ratelimit-limit and x-ratelimit-remaining trailers. Denied
 // RPCs additionally include a retry-after trailer (seconds) and return
-// codes.ResourceExhausted.
+// codes.ResourceExhausted. It panics if limiter is nil.
 func UnaryServerInterceptor(limiter ratelimit.Limiter, opts ...Option) grpc.UnaryServerInterceptor {
-	cfg := applyDefaults(opts)
+	cfg := applyDefaults(limiter, opts)
 
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		key := cfg.keyFunc(ctx, info)
 		result, err := limiter.Allow(ctx, key)
 		if err != nil {
-			if handlerErr := cfg.errorHandler(ctx, info, err); handlerErr != nil {
+			if handlerErr := cfg.limiterFailed(ctx, info, err); handlerErr != nil {
 				return nil, handlerErr
 			}
 			return handler(ctx, req)
@@ -84,15 +92,31 @@ func UnaryServerInterceptor(limiter ratelimit.Limiter, opts ...Option) grpc.Unar
 	}
 }
 
-func applyDefaults(opts []Option) config {
+func applyDefaults(limiter ratelimit.Limiter, opts []Option) config {
+	if limiter == nil {
+		panic("grpcratelimit: the interceptor requires a limiter")
+	}
 	cfg := config{
 		keyFunc:      DefaultKeyFunc,
 		errorHandler: FailClosed,
 	}
 	for _, opt := range opts {
+		if opt == nil {
+			panic("grpcratelimit: options must not be nil")
+		}
 		opt(&cfg)
 	}
 	return cfg
+}
+
+// limiterFailed decides how an RPC ends when the limiter fails: with the
+// reason its context ended if the client has already given up, otherwise
+// with what the error handler returns (nil lets the RPC through).
+func (c config) limiterFailed(ctx context.Context, info *grpc.UnaryServerInfo, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return status.FromContextError(ctxErr).Err()
+	}
+	return c.errorHandler(ctx, info, err)
 }
 
 func setTrailers(ctx context.Context, result ratelimit.Result) {
@@ -113,16 +137,19 @@ type CostFunc func(ctx context.Context, info *grpc.UnaryServerInfo) int64
 // AllowN with a per-RPC cost. An RPC whose cost is larger than the limit is
 // denied without a retry-after trailer, since it can never be allowed; a
 // negative cost is passed to the error handler as an error wrapping
-// ratelimit.ErrInvalidCost.
+// ratelimit.ErrInvalidCost. It panics if limiter or costFn is nil.
 func UnaryServerInterceptorN(limiter ratelimit.Limiter, costFn CostFunc, opts ...Option) grpc.UnaryServerInterceptor {
-	cfg := applyDefaults(opts)
+	if costFn == nil {
+		panic("grpcratelimit: the interceptor requires a cost function")
+	}
+	cfg := applyDefaults(limiter, opts)
 
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		key := cfg.keyFunc(ctx, info)
 		n := costFn(ctx, info)
 		result, err := limiter.AllowN(ctx, key, n)
 		if err != nil {
-			if handlerErr := cfg.errorHandler(ctx, info, err); handlerErr != nil {
+			if handlerErr := cfg.limiterFailed(ctx, info, err); handlerErr != nil {
 				return nil, handlerErr
 			}
 			return handler(ctx, req)
@@ -139,9 +166,11 @@ func UnaryServerInterceptorN(limiter ratelimit.Limiter, costFn CostFunc, opts ..
 }
 
 // StreamServerInterceptor returns a grpc.StreamServerInterceptor that
-// rate-limits incoming streaming RPCs.
+// rate-limits incoming streaming RPCs. The limiter is charged once, when the
+// stream opens; messages on an open stream aren't counted. To limit messages,
+// call the limiter from the stream handler. It panics if limiter is nil.
 func StreamServerInterceptor(limiter ratelimit.Limiter, opts ...Option) grpc.StreamServerInterceptor {
-	cfg := applyDefaults(opts)
+	cfg := applyDefaults(limiter, opts)
 
 	return func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 		ctx := ss.Context()
@@ -149,7 +178,7 @@ func StreamServerInterceptor(limiter ratelimit.Limiter, opts ...Option) grpc.Str
 		key := cfg.keyFunc(ctx, uInfo)
 		result, err := limiter.Allow(ctx, key)
 		if err != nil {
-			if handlerErr := cfg.errorHandler(ctx, uInfo, err); handlerErr != nil {
+			if handlerErr := cfg.limiterFailed(ctx, uInfo, err); handlerErr != nil {
 				return handlerErr
 			}
 			return handler(srv, ss)
@@ -167,9 +196,13 @@ func StreamServerInterceptor(limiter ratelimit.Limiter, opts ...Option) grpc.Str
 
 // StreamServerInterceptorN returns a grpc.StreamServerInterceptor that uses
 // AllowN with a per-RPC cost, with the same handling of costs as
-// UnaryServerInterceptorN.
+// UnaryServerInterceptorN. Like StreamServerInterceptor, it charges once per
+// stream, when the stream opens. It panics if limiter or costFn is nil.
 func StreamServerInterceptorN(limiter ratelimit.Limiter, costFn CostFunc, opts ...Option) grpc.StreamServerInterceptor {
-	cfg := applyDefaults(opts)
+	if costFn == nil {
+		panic("grpcratelimit: the interceptor requires a cost function")
+	}
+	cfg := applyDefaults(limiter, opts)
 
 	return func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 		ctx := ss.Context()
@@ -178,7 +211,7 @@ func StreamServerInterceptorN(limiter ratelimit.Limiter, costFn CostFunc, opts .
 		n := costFn(ctx, uInfo)
 		result, err := limiter.AllowN(ctx, key, n)
 		if err != nil {
-			if handlerErr := cfg.errorHandler(ctx, uInfo, err); handlerErr != nil {
+			if handlerErr := cfg.limiterFailed(ctx, uInfo, err); handlerErr != nil {
 				return handlerErr
 			}
 			return handler(srv, ss)

@@ -1,7 +1,9 @@
 package ratelimit
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"math"
 	"net/http"
 	"strconv"
@@ -12,7 +14,10 @@ type KeyFunc func(r *http.Request) string
 
 // ErrorHandler is called when the rate limiter returns an error. Use this to
 // control fail-open vs fail-closed behavior. The next parameter is the
-// downstream handler — call it to fail open (let the request through).
+// downstream handler — call it to fail open (let the request through). It
+// isn't called when the request's context has already ended: the middleware
+// then answers 499 if the client went away, or 503 if the request's deadline
+// passed.
 type ErrorHandler func(next http.Handler, w http.ResponseWriter, r *http.Request, err error)
 
 // FailClosed returns 500 Internal Server Error when the rate limiter errors.
@@ -40,8 +45,11 @@ type middlewareConfig struct {
 }
 
 // WithKeyFunc sets the function used to extract a rate limit key from each
-// request. The default is DefaultKeyFunc.
+// request. The default is DefaultKeyFunc. It panics if fn is nil.
 func WithKeyFunc(fn KeyFunc) MiddlewareOption {
+	if fn == nil {
+		panic("ratelimit: WithKeyFunc requires a function")
+	}
 	return func(c *middlewareConfig) {
 		c.keyFunc = fn
 	}
@@ -49,8 +57,12 @@ func WithKeyFunc(fn KeyFunc) MiddlewareOption {
 
 // WithDeniedHandler sets a custom handler invoked when a request is denied.
 // The rate-limit headers, including Retry-After when there is one, are already
-// set when it runs. The default responds with 429 and a JSON body.
+// set when it runs. The default responds with 429 and a JSON body. It panics
+// if h is nil.
 func WithDeniedHandler(h http.Handler) MiddlewareOption {
+	if h == nil {
+		panic("ratelimit: WithDeniedHandler requires a handler")
+	}
 	return func(c *middlewareConfig) {
 		c.deniedHandler = h
 	}
@@ -58,8 +70,12 @@ func WithDeniedHandler(h http.Handler) MiddlewareOption {
 
 // WithErrorHandler sets the function called when the rate limiter returns an
 // error. The default is FailClosed (500). Use FailOpen to let requests
-// through on error, or provide a custom handler for logging/metrics.
+// through on error, or provide a custom handler for logging/metrics. It
+// panics if fn is nil.
 func WithErrorHandler(fn ErrorHandler) MiddlewareOption {
+	if fn == nil {
+		panic("ratelimit: WithErrorHandler requires a function")
+	}
 	return func(c *middlewareConfig) {
 		c.errorHandler = fn
 	}
@@ -69,16 +85,16 @@ func WithErrorHandler(fn ErrorHandler) MiddlewareOption {
 // using the given Limiter. Every response includes X-RateLimit-Limit and
 // X-RateLimit-Remaining headers. Denied responses additionally include a
 // Retry-After header and are handled by the denied handler (default: 429
-// with a JSON body).
+// with a JSON body). It panics if limiter is nil.
 func HTTPMiddleware(limiter Limiter, opts ...MiddlewareOption) func(http.Handler) http.Handler {
-	cfg := applyDefaults(opts)
+	cfg := applyDefaults(limiter, opts)
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			key := cfg.keyFunc(r)
 			result, err := limiter.Allow(r.Context(), key)
 			if err != nil {
-				cfg.errorHandler(next, w, r, err)
+				cfg.limiterFailed(next, w, r, err)
 				return
 			}
 
@@ -110,9 +126,13 @@ type CostFunc func(r *http.Request) int64
 // cost. This is useful when different endpoints have different weights. A
 // request whose cost is larger than the limit is denied without a Retry-After
 // header, since it can never be allowed; a negative cost is passed to the
-// error handler as an error wrapping ErrInvalidCost.
+// error handler as an error wrapping ErrInvalidCost. It panics if limiter or
+// costFn is nil.
 func HTTPMiddlewareN(limiter Limiter, costFn CostFunc, opts ...MiddlewareOption) func(http.Handler) http.Handler {
-	cfg := applyDefaults(opts)
+	if costFn == nil {
+		panic("ratelimit: the middleware requires a cost function")
+	}
+	cfg := applyDefaults(limiter, opts)
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -120,7 +140,7 @@ func HTTPMiddlewareN(limiter Limiter, costFn CostFunc, opts ...MiddlewareOption)
 			n := costFn(r)
 			result, err := limiter.AllowN(r.Context(), key, n)
 			if err != nil {
-				cfg.errorHandler(next, w, r, err)
+				cfg.limiterFailed(next, w, r, err)
 				return
 			}
 
@@ -135,16 +155,41 @@ func HTTPMiddlewareN(limiter Limiter, costFn CostFunc, opts ...MiddlewareOption)
 	}
 }
 
-func applyDefaults(opts []MiddlewareOption) middlewareConfig {
+func applyDefaults(limiter Limiter, opts []MiddlewareOption) middlewareConfig {
+	if limiter == nil {
+		panic("ratelimit: the middleware requires a limiter")
+	}
 	cfg := middlewareConfig{
 		keyFunc:       DefaultKeyFunc,
 		deniedHandler: http.HandlerFunc(defaultDeniedHandler),
 		errorHandler:  FailClosed,
 	}
 	for _, opt := range opts {
+		if opt == nil {
+			panic("ratelimit: middleware options must not be nil")
+		}
 		opt(&cfg)
 	}
 	return cfg
+}
+
+// statusClientClosedRequest is nginx's non-standard 499, for a request whose
+// client went away before it was answered.
+const statusClientClosedRequest = 499
+
+// limiterFailed answers a request whose limiter check failed. If the request
+// has already ended, it answers why (499 when the client went away, 503 when
+// the deadline passed); otherwise the error handler decides.
+func (c middlewareConfig) limiterFailed(next http.Handler, w http.ResponseWriter, r *http.Request, err error) {
+	ctxErr := r.Context().Err()
+	switch {
+	case ctxErr == nil:
+		c.errorHandler(next, w, r, err)
+	case errors.Is(ctxErr, context.DeadlineExceeded):
+		http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+	default:
+		w.WriteHeader(statusClientClosedRequest)
+	}
 }
 
 func writeRateLimitHeaders(w http.ResponseWriter, result Result) {

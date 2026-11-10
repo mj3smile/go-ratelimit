@@ -1,6 +1,7 @@
 package ratelimit
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -245,5 +246,78 @@ func TestHTTPMiddleware_CustomErrorHandler(t *testing.T) {
 	}
 	if gotErr == nil || gotErr.Error() != "redis: connection refused" {
 		t.Errorf("custom error handler: err = %v, want redis error", gotErr)
+	}
+}
+
+// A nil argument must fail when the middleware is built, not on every request.
+func TestHTTPMiddleware_NilArgumentsPanicAtSetup(t *testing.T) {
+	limiter := mustNew(t, WithRate(5, time.Minute))
+	cost := func(*http.Request) int64 { return 1 }
+	cases := []struct {
+		name  string
+		setup func()
+	}{
+		{"WithKeyFunc(nil)", func() { WithKeyFunc(nil) }},
+		{"WithDeniedHandler(nil)", func() { WithDeniedHandler(nil) }},
+		{"WithErrorHandler(nil)", func() { WithErrorHandler(nil) }},
+		{"nil option", func() { HTTPMiddleware(limiter, nil) }},
+		{"HTTPMiddleware without a limiter", func() { HTTPMiddleware(nil) }},
+		{"HTTPMiddlewareN without a limiter", func() { HTTPMiddlewareN(nil, cost) }},
+		{"HTTPMiddlewareN without a cost function", func() { HTTPMiddlewareN(limiter, nil) }},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Error("expected a panic at setup")
+				}
+			}()
+			tc.setup()
+		})
+	}
+}
+
+// When the request's context has already ended, the limiter error comes from
+// the request being over, so the middleware answers why instead of applying
+// the error policy: 499 when the client went away, 503 when the deadline passed.
+func TestHTTPMiddleware_EndedRequestReportsWhy(t *testing.T) {
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	expired, cancelExpired := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelExpired()
+
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+		want int
+	}{
+		{"canceled", canceled, 499},
+		{"deadline passed", expired, http.StatusServiceUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			handlerCalls := 0
+			failOpen := WithErrorHandler(func(next http.Handler, w http.ResponseWriter, r *http.Request, _ error) {
+				handlerCalls++
+				next.ServeHTTP(w, r)
+			})
+			limiter := newErrLimiter(tc.ctx.Err())
+			cost := func(*http.Request) int64 { return 1 }
+
+			for name, mw := range map[string]func(http.Handler) http.Handler{
+				"HTTPMiddleware":  HTTPMiddleware(limiter, failOpen),
+				"HTTPMiddlewareN": HTTPMiddlewareN(limiter, cost, failOpen),
+			} {
+				req := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(tc.ctx)
+				rec := httptest.NewRecorder()
+				mw(newTestHandler()).ServeHTTP(rec, req)
+				if rec.Code != tc.want {
+					t.Errorf("%s: status = %d, want %d", name, rec.Code, tc.want)
+				}
+			}
+			if handlerCalls != 0 {
+				t.Errorf("the error handler ran %d times for requests that had already ended", handlerCalls)
+			}
+		})
 	}
 }

@@ -265,3 +265,80 @@ func TestUnaryServerInterceptorN_CostAboveLimit(t *testing.T) {
 		t.Errorf("retry-after = %v, want none: the RPC can never be allowed", got)
 	}
 }
+
+// A nil argument must stop the server from starting. Called later, a nil
+// function panics inside an RPC, and gRPC doesn't recover that panic, so the
+// whole server process would crash.
+func TestInterceptors_NilArgumentsPanicAtSetup(t *testing.T) {
+	limiter := mustNew(t, ratelimit.WithRate(5, time.Minute))
+	cost := func(context.Context, *grpc.UnaryServerInfo) int64 { return 1 }
+	cases := []struct {
+		name  string
+		setup func()
+	}{
+		{"WithKeyFunc(nil)", func() { WithKeyFunc(nil) }},
+		{"WithErrorHandler(nil)", func() { WithErrorHandler(nil) }},
+		{"nil option", func() { UnaryServerInterceptor(limiter, nil) }},
+		{"UnaryServerInterceptor without a limiter", func() { UnaryServerInterceptor(nil) }},
+		{"UnaryServerInterceptorN without a limiter", func() { UnaryServerInterceptorN(nil, cost) }},
+		{"UnaryServerInterceptorN without a cost function", func() { UnaryServerInterceptorN(limiter, nil) }},
+		{"StreamServerInterceptor without a limiter", func() { StreamServerInterceptor(nil) }},
+		{"StreamServerInterceptorN without a limiter", func() { StreamServerInterceptorN(nil, cost) }},
+		{"StreamServerInterceptorN without a cost function", func() { StreamServerInterceptorN(limiter, nil) }},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Error("expected a panic at setup")
+				}
+			}()
+			tc.setup()
+		})
+	}
+}
+
+// When the RPC's context has already ended, the limiter error comes from the
+// client giving up, so the RPC ends with the matching code and the error
+// handler isn't asked to let it through.
+func TestInterceptors_EndedRPCReportsWhy(t *testing.T) {
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	expired, cancelExpired := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelExpired()
+
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+		want codes.Code
+	}{
+		{"canceled", canceled, codes.Canceled},
+		{"deadline passed", expired, codes.DeadlineExceeded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			handlerCalls := 0
+			failOpen := WithErrorHandler(func(context.Context, *grpc.UnaryServerInfo, error) error {
+				handlerCalls++
+				return nil
+			})
+			limiter := newErrLimiter(tc.ctx.Err())
+			cost := func(context.Context, *grpc.UnaryServerInfo) int64 { return 1 }
+			stream := &fakeServerStream{ctx: tc.ctx}
+
+			_, unaryErr := UnaryServerInterceptor(limiter, failOpen)(tc.ctx, "req", testInfo, testHandler)
+			_, unaryNErr := UnaryServerInterceptorN(limiter, cost, failOpen)(tc.ctx, "req", testInfo, testHandler)
+			streamErr := StreamServerInterceptor(limiter, failOpen)(nil, stream, testStreamInfo, testStreamHandler)
+			streamNErr := StreamServerInterceptorN(limiter, cost, failOpen)(nil, stream, testStreamInfo, testStreamHandler)
+
+			for name, err := range map[string]error{"unary": unaryErr, "unary N": unaryNErr, "stream": streamErr, "stream N": streamNErr} {
+				if code := status.Code(err); code != tc.want {
+					t.Errorf("%s: code = %v, want %v", name, code, tc.want)
+				}
+			}
+			if handlerCalls != 0 {
+				t.Errorf("the error handler ran %d times for RPCs whose client had already given up", handlerCalls)
+			}
+		})
+	}
+}
