@@ -67,7 +67,7 @@ func (sw *slidingWindow) check(ctx context.Context, key string, n int64) (Result
 }
 
 func (sw *slidingWindow) Reset(ctx context.Context, key string) error {
-	return sw.store.ResetSliding(ctx, key)
+	return sw.store.ResetSliding(ctx, key, sw.window)
 }
 
 // retryAfter returns how long until a request of cost n would fit.

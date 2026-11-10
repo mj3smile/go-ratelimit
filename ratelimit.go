@@ -97,7 +97,7 @@ type Limiter interface {
 	// set to InfDuration. A negative cost returns an error wrapping ErrInvalidCost.
 	AllowN(ctx context.Context, key string, n int64) (Result, error)
 
-	// Reset clears the rate limit state for the given key.
+	// Reset clears this limiter's state for the given key.
 	Reset(ctx context.Context, key string) error
 }
 
@@ -127,6 +127,11 @@ func allowN(ctx context.Context, key string, n, limit int64, check func(context.
 }
 
 // Store is the storage backend interface for rate limit state.
+//
+// A store keeps separate state for each key and each limiter's settings: the
+// window, and the capacity or burst for the bucket algorithms. Limiters with
+// different settings that share a store never read or change each other's
+// state.
 type Store interface {
 	// CheckAndIncrement atomically increments the counter for a key by n within
 	// the given window, but only if the resulting count would not exceed
@@ -194,17 +199,20 @@ type Store interface {
 	// Remaining and, when denied, RetryAfter.
 	CheckAndAdvanceTAT(ctx context.Context, key string, burst int64, window Window, n int64) (delay time.Duration, applied bool, err error)
 
-	// ResetFixed removes the fixed-window state for the given key.
-	ResetFixed(ctx context.Context, key string) error
+	// ResetFixed removes the fixed-window state for the given key and window.
+	ResetFixed(ctx context.Context, key string, window Window) error
 
-	// ResetSliding removes the sliding-window state for the given key.
-	ResetSliding(ctx context.Context, key string) error
+	// ResetSliding removes the sliding-window state for the given key and
+	// window.
+	ResetSliding(ctx context.Context, key string, window Window) error
 
-	// ResetTokens removes the token-bucket state for the given key.
-	ResetTokens(ctx context.Context, key string) error
+	// ResetTokens removes the token-bucket state for the given key, capacity
+	// and window.
+	ResetTokens(ctx context.Context, key string, capacity int64, window Window) error
 
-	// ResetTAT removes the GCRA (leaky bucket) state for the given key.
-	ResetTAT(ctx context.Context, key string) error
+	// ResetTAT removes the GCRA (leaky bucket) state for the given key, burst
+	// and window.
+	ResetTAT(ctx context.Context, key string, burst int64, window Window) error
 }
 
 // OnResultFunc is called after every rate limit check with the request context,
@@ -325,7 +333,11 @@ func WithBurst(burst int64) Option {
 	}
 }
 
-// WithStore sets the storage backend.
+// WithStore sets the storage backend. Several limiters can share one store:
+// limiters with different settings keep separate state even for the same key,
+// but limiters with identical settings share a budget for each key. To keep
+// those apart, give them different keys (for example, a key function that adds
+// the route) or use separate Redis stores with redisstore.WithPrefix.
 func WithStore(store Store) Option {
 	return func(c *config) {
 		c.store = store

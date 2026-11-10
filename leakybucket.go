@@ -66,5 +66,5 @@ func (lb *leakyBucket) check(ctx context.Context, key string, n int64) (Result, 
 }
 
 func (lb *leakyBucket) Reset(ctx context.Context, key string) error {
-	return lb.store.ResetTAT(ctx, key)
+	return lb.store.ResetTAT(ctx, key, lb.burst, lb.window)
 }

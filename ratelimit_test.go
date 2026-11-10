@@ -215,3 +215,34 @@ func TestAllowN_DeniedReportsRemaining(t *testing.T) {
 		})
 	}
 }
+
+// Limiters with different settings that share a store and a key keep separate
+// state: neither uses up the other's budget or reads the other's window.
+func TestLimitersWithDifferentSettingsKeepSeparateState(t *testing.T) {
+	ctx := context.Background()
+	algorithms := []struct {
+		name string
+		algo Algorithm
+	}{
+		{"fixed window", FixedWindow},
+		{"sliding window", SlidingWindow},
+		{"token bucket", TokenBucket},
+		{"leaky bucket", LeakyBucket},
+	}
+
+	for _, a := range algorithms {
+		t.Run(a.name, func(t *testing.T) {
+			store := NewMemoryStore()
+			api := mustNew(t, WithAlgorithm(a.algo), WithStore(store), PerMinute(100))
+			login := mustNew(t, WithAlgorithm(a.algo), WithStore(store), PerSecond(5))
+
+			api.Allow(ctx, "203.0.113.7")
+			if r, _ := login.AllowN(ctx, "203.0.113.7", 5); !r.Allowed {
+				t.Errorf("login AllowN(5) after one api request = %+v, want allowed", r)
+			}
+			if r, _ := api.AllowN(ctx, "203.0.113.7", 99); !r.Allowed {
+				t.Errorf("api AllowN(99) after login used its 5 = %+v, want allowed", r)
+			}
+		})
+	}
+}

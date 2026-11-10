@@ -61,7 +61,7 @@ func (tb *tokenBucket) check(ctx context.Context, key string, n int64) (Result, 
 }
 
 func (tb *tokenBucket) Reset(ctx context.Context, key string) error {
-	return tb.store.ResetTokens(ctx, key)
+	return tb.store.ResetTokens(ctx, key, tb.capacity, tb.window)
 }
 
 // retryAfter computes how long until n tokens become available given the

@@ -141,16 +141,21 @@ func TestRedisStore_ResetByAlgorithm(t *testing.T) {
 		store.CheckAndAdvanceTAT(ctx, "key", 10, window, 1)
 	}
 
-	suffixes := []string{"fw", "sw", "tb", "gcra"}
+	keys := map[string]string{
+		"fw":   store.redisKey("key", "fw", window, 0),
+		"sw":   store.redisKey("key", "sw", window, 0),
+		"tb":   store.redisKey("key", "tb", window, 10),
+		"gcra": store.redisKey("key", "gcra", window, 10),
+	}
 	cases := []struct {
 		name    string
 		reset   func() error
 		cleared string
 	}{
-		{"ResetFixed", func() error { return store.ResetFixed(ctx, "key") }, "fw"},
-		{"ResetSliding", func() error { return store.ResetSliding(ctx, "key") }, "sw"},
-		{"ResetTokens", func() error { return store.ResetTokens(ctx, "key") }, "tb"},
-		{"ResetTAT", func() error { return store.ResetTAT(ctx, "key") }, "gcra"},
+		{"ResetFixed", func() error { return store.ResetFixed(ctx, "key", window) }, "fw"},
+		{"ResetSliding", func() error { return store.ResetSliding(ctx, "key", window) }, "sw"},
+		{"ResetTokens", func() error { return store.ResetTokens(ctx, "key", 10, window) }, "tb"},
+		{"ResetTAT", func() error { return store.ResetTAT(ctx, "key", 10, window) }, "gcra"},
 	}
 
 	for _, tc := range cases {
@@ -160,15 +165,52 @@ func TestRedisStore_ResetByAlgorithm(t *testing.T) {
 			if err := tc.reset(); err != nil {
 				t.Fatalf("%s: %v", tc.name, err)
 			}
-			for _, suffix := range suffixes {
-				exists := client.Exists(ctx, store.redisKey("key", suffix)).Val()
-				if suffix == tc.cleared {
+			for algorithm, rk := range keys {
+				exists := client.Exists(ctx, rk).Val()
+				if algorithm == tc.cleared {
 					if exists != 0 {
-						t.Errorf("%s should clear the %q key", tc.name, suffix)
+						t.Errorf("%s should clear the %q key", tc.name, algorithm)
 					}
 				} else if exists != 1 {
-					t.Errorf("%s must leave the %q key intact", tc.name, suffix)
+					t.Errorf("%s must leave the %q key intact", tc.name, algorithm)
 				}
+			}
+		})
+	}
+}
+
+// Limiters with different settings that share the store and a key keep
+// separate state: neither uses up the other's budget or reads the other's window.
+func TestRedisStore_LimitersWithDifferentSettingsKeepSeparateState(t *testing.T) {
+	store, _ := newStore(t)
+	ctx := context.Background()
+	algorithms := []struct {
+		name string
+		algo ratelimit.Algorithm
+	}{
+		{"fixed window", ratelimit.FixedWindow},
+		{"sliding window", ratelimit.SlidingWindow},
+		{"token bucket", ratelimit.TokenBucket},
+		{"leaky bucket", ratelimit.LeakyBucket},
+	}
+
+	for _, a := range algorithms {
+		t.Run(a.name, func(t *testing.T) {
+			api, err := ratelimit.New(ratelimit.WithAlgorithm(a.algo), ratelimit.WithStore(store), ratelimit.PerMinute(100))
+			if err != nil {
+				t.Fatal(err)
+			}
+			login, err := ratelimit.New(ratelimit.WithAlgorithm(a.algo), ratelimit.WithStore(store), ratelimit.PerSecond(5))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			api.Allow(ctx, "203.0.113.7")
+			if r, _ := login.AllowN(ctx, "203.0.113.7", 5); !r.Allowed {
+				t.Errorf("login AllowN(5) after one api request = %+v, want allowed", r)
+			}
+			if r, _ := api.AllowN(ctx, "203.0.113.7", 99); !r.Allowed {
+				t.Errorf("api AllowN(99) after login used its 5 = %+v, want allowed", r)
 			}
 		})
 	}
@@ -381,7 +423,7 @@ func TestRedisStore_CheckAndConsumeTokens_FullBucketEarnsNoCredit(t *testing.T) 
 	if err != nil {
 		t.Fatalf("TIME: %v", err)
 	}
-	rk := store.redisKey("k", "tb")
+	rk := store.redisKey("k", "tb", ratelimit.Window{Rate: 10, Period: time.Second}, 1)
 	client.HSet(ctx, rk, "tokens", 0, "last_refill", redisNow.Add(-190*time.Millisecond).UnixMicro())
 	client.PExpire(ctx, rk, 10*time.Second)
 
@@ -471,10 +513,9 @@ func TestRedisStore_KeyExpiry(t *testing.T) {
 	store.CheckAndConsumeTokens(ctx, "tb", 2, window, 2)
 	store.CheckAndAdvanceTAT(ctx, "gcra", 2, window, 2)
 
-	suffixes := []string{"fw", "sw", "tb", "gcra"}
+	keys := expiryKeys(store, window, 2)
 
-	for _, s := range suffixes {
-		rk := store.redisKey(s, s)
+	for s, rk := range keys {
 		ttl := client.PTTL(ctx, rk).Val()
 		if ttl <= 0 {
 			t.Fatalf("%s: key should have a TTL, got %v", s, ttl)
@@ -484,11 +525,22 @@ func TestRedisStore_KeyExpiry(t *testing.T) {
 	// Longest TTL is the sliding window's 2 * period = 2s.
 	time.Sleep(2500 * time.Millisecond)
 
-	for _, s := range suffixes {
-		rk := store.redisKey(s, s)
+	for s, rk := range keys {
 		if client.Exists(ctx, rk).Val() != 0 {
 			t.Errorf("%s: key should have expired", s)
 		}
+	}
+}
+
+// expiryKeys returns the Redis keys the expiry tests write, where each
+// algorithm uses its own name as the key and the buckets use size as their
+// capacity or burst.
+func expiryKeys(store *Store, window ratelimit.Window, size int64) map[string]string {
+	return map[string]string{
+		"fw":   store.redisKey("fw", "fw", window, 0),
+		"sw":   store.redisKey("sw", "sw", window, 0),
+		"tb":   store.redisKey("tb", "tb", window, size),
+		"gcra": store.redisKey("gcra", "gcra", window, size),
 	}
 }
 
@@ -509,15 +561,15 @@ func TestRedisStore_TTLExtension(t *testing.T) {
 	store.CheckAndConsumeTokens(ctx, "tb", 2, window, 2)
 	store.CheckAndAdvanceTAT(ctx, "gcra", 2, window, 2)
 
-	suffixes := []string{"fw", "sw", "tb", "gcra"}
+	keys := expiryKeys(store, window, 2)
 
 	// Sleep less than every key's TTL (min is 1s) so all four survive to be
 	// re-accessed — this tests refresh, not re-creation.
 	time.Sleep(600 * time.Millisecond)
 
-	before := make(map[string]time.Duration, len(suffixes))
-	for _, s := range suffixes {
-		before[s] = client.PTTL(ctx, store.redisKey(s, s)).Val()
+	before := make(map[string]time.Duration, len(keys))
+	for s, rk := range keys {
+		before[s] = client.PTTL(ctx, rk).Val()
 	}
 
 	store.CheckAndIncrement(ctx, "fw", window, 1)
@@ -525,9 +577,9 @@ func TestRedisStore_TTLExtension(t *testing.T) {
 	store.CheckAndConsumeTokens(ctx, "tb", 2, window, 1)
 	store.CheckAndAdvanceTAT(ctx, "gcra", 2, window, 1)
 
-	after := make(map[string]time.Duration, len(suffixes))
-	for _, s := range suffixes {
-		after[s] = client.PTTL(ctx, store.redisKey(s, s)).Val()
+	after := make(map[string]time.Duration, len(keys))
+	for s, rk := range keys {
+		after[s] = client.PTTL(ctx, rk).Val()
 	}
 
 	// The three rolling algorithms must have a later expiry than a moment ago.
@@ -561,7 +613,7 @@ func TestRedisStore_FractionalEmission(t *testing.T) {
 	if _, _, _, err := store.CheckAndConsumeTokens(ctx, "tb", 5, window, 1); err != nil {
 		t.Fatalf("token bucket existing key: %v", err)
 	}
-	if ttl := client.PTTL(ctx, store.redisKey("tb", "tb")).Val(); ttl <= 0 {
+	if ttl := client.PTTL(ctx, store.redisKey("tb", "tb", window, 5)).Val(); ttl <= 0 {
 		t.Errorf("tb: expected a positive TTL, got %v", ttl)
 	}
 
@@ -571,7 +623,7 @@ func TestRedisStore_FractionalEmission(t *testing.T) {
 	if _, _, err := store.CheckAndAdvanceTAT(ctx, "gcra", 5, window, 1); err != nil {
 		t.Fatalf("gcra existing key: %v", err)
 	}
-	if ttl := client.PTTL(ctx, store.redisKey("gcra", "gcra")).Val(); ttl <= 0 {
+	if ttl := client.PTTL(ctx, store.redisKey("gcra", "gcra", window, 5)).Val(); ttl <= 0 {
 		t.Errorf("gcra: expected a positive TTL, got %v", ttl)
 	}
 }

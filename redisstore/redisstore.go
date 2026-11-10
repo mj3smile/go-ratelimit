@@ -3,6 +3,7 @@ package redisstore
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	ratelimit "github.com/mj3smile/go-ratelimit"
@@ -23,7 +24,8 @@ type Store struct {
 type Option func(*Store)
 
 // WithPrefix sets a key prefix for all Redis keys. Useful when sharing a
-// Redis instance with other applications.
+// Redis instance with other applications, or to give limiters with identical
+// settings separate budgets.
 func WithPrefix(prefix string) Option {
 	return func(s *Store) {
 		s.prefix = prefix
@@ -40,12 +42,29 @@ func New(client redis.Cmdable, opts ...Option) *Store {
 	return s
 }
 
-func (s *Store) redisKey(key, suffix string) string {
-	return s.prefix + key + ":" + suffix
+// redisKey builds the Redis key for one limiter's state for one key. The
+// limiter's settings are part of it, so limiters with different settings never
+// share state: <prefix><key>:<algorithm>:<rate>:<period in ms>, plus
+// :<capacity or burst> for the buckets.
+func (s *Store) redisKey(key, algorithm string, window ratelimit.Window, size int64) string {
+	b := make([]byte, 0, 64)
+	b = append(b, s.prefix...)
+	b = append(b, key...)
+	b = append(b, ':')
+	b = append(b, algorithm...)
+	b = append(b, ':')
+	b = strconv.AppendInt(b, window.Rate, 10)
+	b = append(b, ':')
+	b = strconv.AppendInt(b, window.Period.Milliseconds(), 10)
+	if size > 0 {
+		b = append(b, ':')
+		b = strconv.AppendInt(b, size, 10)
+	}
+	return string(b)
 }
 
 func (s *Store) CheckAndIncrement(ctx context.Context, key string, window ratelimit.Window, n int64) (int64, time.Duration, bool, error) {
-	rk := s.redisKey(key, "fw")
+	rk := s.redisKey(key, "fw", window, 0)
 	periodMS := window.Period.Milliseconds()
 
 	res, err := fixedWindowScript.Run(ctx, s.client, []string{rk},
@@ -60,7 +79,7 @@ func (s *Store) CheckAndIncrement(ctx context.Context, key string, window rateli
 }
 
 func (s *Store) CheckAndIncrementSliding(ctx context.Context, key string, window ratelimit.Window, n int64) (int64, int64, time.Duration, bool, error) {
-	rk := s.redisKey(key, "sw")
+	rk := s.redisKey(key, "sw", window, 0)
 
 	res, err := slidingWindowScript.Run(ctx, s.client, []string{rk},
 		window.Rate, n, window.Period.Microseconds(),
@@ -74,7 +93,7 @@ func (s *Store) CheckAndIncrementSliding(ctx context.Context, key string, window
 }
 
 func (s *Store) CheckAndConsumeTokens(ctx context.Context, key string, capacity int64, window ratelimit.Window, n int64) (int64, time.Duration, bool, error) {
-	rk := s.redisKey(key, "tb")
+	rk := s.redisKey(key, "tb", window, capacity)
 
 	res, err := tokenBucketScript.Run(ctx, s.client, []string{rk},
 		capacity, window.EmissionInterval().Microseconds(), n,
@@ -88,7 +107,7 @@ func (s *Store) CheckAndConsumeTokens(ctx context.Context, key string, capacity 
 }
 
 func (s *Store) CheckAndAdvanceTAT(ctx context.Context, key string, burst int64, window ratelimit.Window, n int64) (time.Duration, bool, error) {
-	rk := s.redisKey(key, "gcra")
+	rk := s.redisKey(key, "gcra", window, burst)
 
 	res, err := gcraScript.Run(ctx, s.client, []string{rk},
 		burst, window.EmissionInterval().Microseconds(), n,
@@ -101,24 +120,24 @@ func (s *Store) CheckAndAdvanceTAT(ctx context.Context, key string, burst int64,
 	return delay, res[1] == 1, nil
 }
 
-func (s *Store) ResetFixed(ctx context.Context, key string) error {
-	return s.reset(ctx, key, "fw")
+func (s *Store) ResetFixed(ctx context.Context, key string, window ratelimit.Window) error {
+	return s.reset(ctx, s.redisKey(key, "fw", window, 0))
 }
 
-func (s *Store) ResetSliding(ctx context.Context, key string) error {
-	return s.reset(ctx, key, "sw")
+func (s *Store) ResetSliding(ctx context.Context, key string, window ratelimit.Window) error {
+	return s.reset(ctx, s.redisKey(key, "sw", window, 0))
 }
 
-func (s *Store) ResetTokens(ctx context.Context, key string) error {
-	return s.reset(ctx, key, "tb")
+func (s *Store) ResetTokens(ctx context.Context, key string, capacity int64, window ratelimit.Window) error {
+	return s.reset(ctx, s.redisKey(key, "tb", window, capacity))
 }
 
-func (s *Store) ResetTAT(ctx context.Context, key string) error {
-	return s.reset(ctx, key, "gcra")
+func (s *Store) ResetTAT(ctx context.Context, key string, burst int64, window ratelimit.Window) error {
+	return s.reset(ctx, s.redisKey(key, "gcra", window, burst))
 }
 
-func (s *Store) reset(ctx context.Context, key, suffix string) error {
-	if err := s.client.Del(ctx, s.redisKey(key, suffix)).Err(); err != nil {
+func (s *Store) reset(ctx context.Context, rk string) error {
+	if err := s.client.Del(ctx, rk).Err(); err != nil {
 		return fmt.Errorf("redisstore: reset: %w", err)
 	}
 	return nil

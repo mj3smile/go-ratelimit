@@ -45,5 +45,5 @@ func (fw *fixedWindow) check(ctx context.Context, key string, n int64) (Result, 
 }
 
 func (fw *fixedWindow) Reset(ctx context.Context, key string) error {
-	return fw.store.ResetFixed(ctx, key)
+	return fw.store.ResetFixed(ctx, key, fw.window)
 }

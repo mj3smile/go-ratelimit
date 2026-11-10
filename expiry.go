@@ -12,12 +12,12 @@ const (
 )
 
 type heapKey struct {
-	mt  mapType
-	key string
+	mt mapType
+	sk stateKey
 }
 
 type heapItem struct {
-	key    string
+	sk     stateKey
 	mt     mapType
 	expiry time.Time
 	index  int

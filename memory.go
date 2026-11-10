@@ -27,6 +27,15 @@ type gcraEntry struct {
 	tat time.Time
 }
 
+// stateKey identifies the state one limiter keeps for one key. The limiter's
+// settings are part of it, so limiters with different settings never share
+// state. size is the bucket capacity or burst, and zero for the windows.
+type stateKey struct {
+	key    string
+	window Window
+	size   int64
+}
+
 // MemoryStore is an in-memory Store implementation.
 // It is safe for concurrent use and suitable for single-instance deployments
 // or testing.
@@ -35,10 +44,10 @@ type gcraEntry struct {
 // min-heap of expiry times.
 type MemoryStore struct {
 	mu      sync.Mutex
-	entries map[string]*entry
-	sliding map[string]*slidingEntry
-	tokens  map[string]*tokenEntry
-	gcra    map[string]*gcraEntry
+	entries map[stateKey]*entry
+	sliding map[stateKey]*slidingEntry
+	tokens  map[stateKey]*tokenEntry
+	gcra    map[stateKey]*gcraEntry
 	now     func() time.Time // for testing
 
 	eh     expiryHeap
@@ -52,10 +61,10 @@ const removePerCall = 2
 // NewMemoryStore creates a new in-memory store.
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		entries: make(map[string]*entry),
-		sliding: make(map[string]*slidingEntry),
-		tokens:  make(map[string]*tokenEntry),
-		gcra:    make(map[string]*gcraEntry),
+		entries: make(map[stateKey]*entry),
+		sliding: make(map[stateKey]*slidingEntry),
+		tokens:  make(map[stateKey]*tokenEntry),
+		gcra:    make(map[stateKey]*gcraEntry),
 		eh:      make(expiryHeap, 0),
 		lookup:  make(map[heapKey]*heapItem),
 		now:     time.Now,
@@ -64,15 +73,15 @@ func NewMemoryStore() *MemoryStore {
 
 // touchKey updates the expiry for a key in the min-heap. Must be called
 // while s.mu is held.
-func (s *MemoryStore) touchKey(key string, mt mapType, ttl time.Duration) {
+func (s *MemoryStore) touchKey(sk stateKey, mt mapType, ttl time.Duration) {
 	expiry := s.now().Add(ttl)
-	hk := heapKey{mt: mt, key: key}
+	hk := heapKey{mt: mt, sk: sk}
 	if item, ok := s.lookup[hk]; ok {
 		item.expiry = expiry
 		heap.Fix(&s.eh, item.index)
 		return
 	}
-	item := &heapItem{key: key, mt: mt, expiry: expiry}
+	item := &heapItem{sk: sk, mt: mt, expiry: expiry}
 	s.lookup[hk] = item
 	heap.Push(&s.eh, item)
 }
@@ -85,23 +94,23 @@ func (s *MemoryStore) removeExpired(now time.Time, limit int) {
 			return
 		}
 		item := heap.Pop(&s.eh).(*heapItem)
-		delete(s.lookup, heapKey{mt: item.mt, key: item.key})
-		s.deleteFromMap(item.mt, item.key)
+		delete(s.lookup, heapKey{mt: item.mt, sk: item.sk})
+		s.deleteFromMap(item.mt, item.sk)
 	}
 }
 
-// deleteFromMap removes key from the state map identified by mt. Caller must
+// deleteFromMap removes sk from the state map identified by mt. Caller must
 // hold s.mu.
-func (s *MemoryStore) deleteFromMap(mt mapType, key string) {
+func (s *MemoryStore) deleteFromMap(mt mapType, sk stateKey) {
 	switch mt {
 	case mapEntries:
-		delete(s.entries, key)
+		delete(s.entries, sk)
 	case mapSliding:
-		delete(s.sliding, key)
+		delete(s.sliding, sk)
 	case mapTokens:
-		delete(s.tokens, key)
+		delete(s.tokens, sk)
 	case mapGCRA:
-		delete(s.gcra, key)
+		delete(s.gcra, sk)
 	}
 }
 
@@ -114,16 +123,17 @@ func (s *MemoryStore) CheckAndIncrement(ctx context.Context, key string, window 
 
 	now := s.now()
 	s.removeExpired(now, removePerCall)
-	e, ok := s.entries[key]
+	sk := stateKey{key: key, window: window}
+	e, ok := s.entries[sk]
 	if !ok || !now.Before(e.expiresAt) {
 		if n > window.Rate {
 			return 0, window.Period, false, nil
 		}
-		s.entries[key] = &entry{
+		s.entries[sk] = &entry{
 			count:     n,
 			expiresAt: now.Add(window.Period),
 		}
-		s.touchKey(key, mapEntries, window.Period)
+		s.touchKey(sk, mapEntries, window.Period)
 		return n, window.Period, true, nil
 	}
 
@@ -144,17 +154,18 @@ func (s *MemoryStore) CheckAndIncrementSliding(ctx context.Context, key string, 
 	ttl := 2 * window.Period
 	now := s.now()
 	s.removeExpired(now, removePerCall)
-	e, ok := s.sliding[key]
+	sk := stateKey{key: key, window: window}
+	e, ok := s.sliding[sk]
 	if !ok {
 		if n > window.Rate {
 			return 0, 0, 0, false, nil
 		}
-		s.sliding[key] = &slidingEntry{curr: n, currStart: now}
-		s.touchKey(key, mapSliding, ttl)
+		s.sliding[sk] = &slidingEntry{curr: n, currStart: now}
+		s.touchKey(sk, mapSliding, ttl)
 		return n, 0, 0, true, nil
 	}
 
-	s.touchKey(key, mapSliding, ttl)
+	s.touchKey(sk, mapSliding, ttl)
 
 	// Rotate buckets based on how many periods have elapsed since currStart.
 	periods := int64(now.Sub(e.currStart) / window.Period)
@@ -193,18 +204,19 @@ func (s *MemoryStore) CheckAndConsumeTokens(ctx context.Context, key string, cap
 	s.removeExpired(now, removePerCall)
 	emissionInterval := window.EmissionInterval()
 
-	e, ok := s.tokens[key]
+	sk := stateKey{key: key, window: window, size: capacity}
+	e, ok := s.tokens[sk]
 	if !ok {
 		// Initial state: bucket starts full at capacity.
 		if n > capacity {
 			return capacity, 0, false, nil
 		}
 		tokens := capacity - n
-		s.tokens[key] = &tokenEntry{
+		s.tokens[sk] = &tokenEntry{
 			tokens:     tokens,
 			lastRefill: now,
 		}
-		s.touchKey(key, mapTokens, time.Duration(capacity-tokens)*emissionInterval)
+		s.touchKey(sk, mapTokens, time.Duration(capacity-tokens)*emissionInterval)
 		return tokens, 0, true, nil
 	}
 
@@ -232,7 +244,7 @@ func (s *MemoryStore) CheckAndConsumeTokens(ctx context.Context, key string, cap
 	if ttl < 0 {
 		ttl = 0
 	}
-	s.touchKey(key, mapTokens, ttl)
+	s.touchKey(sk, mapTokens, ttl)
 
 	return e.tokens, sinceLastRefill, applied, nil
 }
@@ -249,7 +261,8 @@ func (s *MemoryStore) CheckAndAdvanceTAT(ctx context.Context, key string, burst 
 	delayTolerance := time.Duration(burst) * emissionInterval
 
 	tat := now
-	e, ok := s.gcra[key]
+	sk := stateKey{key: key, window: window, size: burst}
+	e, ok := s.gcra[sk]
 	if ok && e.tat.After(now) {
 		tat = e.tat
 	}
@@ -262,41 +275,42 @@ func (s *MemoryStore) CheckAndAdvanceTAT(ctx context.Context, key string, burst 
 	}
 
 	if !ok {
-		s.gcra[key] = &gcraEntry{tat: newTAT}
+		s.gcra[sk] = &gcraEntry{tat: newTAT}
 	} else {
 		e.tat = newTAT
 	}
-	s.touchKey(key, mapGCRA, delay)
+	s.touchKey(sk, mapGCRA, delay)
 	return delay, true, nil
 }
 
-// ResetFixed removes the fixed-window state for the given key.
-func (s *MemoryStore) ResetFixed(ctx context.Context, key string) error {
-	return s.reset(key, mapEntries)
+// ResetFixed removes the fixed-window state for the given key and window.
+func (s *MemoryStore) ResetFixed(ctx context.Context, key string, window Window) error {
+	return s.reset(stateKey{key: key, window: window}, mapEntries)
 }
 
-// ResetSliding removes the sliding-window state for the given key.
-func (s *MemoryStore) ResetSliding(ctx context.Context, key string) error {
-	return s.reset(key, mapSliding)
+// ResetSliding removes the sliding-window state for the given key and window.
+func (s *MemoryStore) ResetSliding(ctx context.Context, key string, window Window) error {
+	return s.reset(stateKey{key: key, window: window}, mapSliding)
 }
 
-// ResetTokens removes the token-bucket state for the given key.
-func (s *MemoryStore) ResetTokens(ctx context.Context, key string) error {
-	return s.reset(key, mapTokens)
+// ResetTokens removes the token-bucket state for the given key, capacity and
+// window.
+func (s *MemoryStore) ResetTokens(ctx context.Context, key string, capacity int64, window Window) error {
+	return s.reset(stateKey{key: key, window: window, size: capacity}, mapTokens)
 }
 
-// ResetTAT removes the GCRA state for the given key.
-func (s *MemoryStore) ResetTAT(ctx context.Context, key string) error {
-	return s.reset(key, mapGCRA)
+// ResetTAT removes the GCRA state for the given key, burst and window.
+func (s *MemoryStore) ResetTAT(ctx context.Context, key string, burst int64, window Window) error {
+	return s.reset(stateKey{key: key, window: window, size: burst}, mapGCRA)
 }
 
-func (s *MemoryStore) reset(key string, mt mapType) error {
+func (s *MemoryStore) reset(sk stateKey, mt mapType) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.deleteFromMap(mt, key)
+	s.deleteFromMap(mt, sk)
 
-	hk := heapKey{mt: mt, key: key}
+	hk := heapKey{mt: mt, sk: sk}
 	if item, ok := s.lookup[hk]; ok {
 		heap.Remove(&s.eh, item.index)
 		delete(s.lookup, hk)

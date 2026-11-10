@@ -83,10 +83,10 @@ func TestMemoryStore_ResetByAlgorithm(t *testing.T) {
 		reset   func(*MemoryStore) error
 		cleared func(*MemoryStore) int
 	}{
-		{"ResetFixed", func(s *MemoryStore) error { return s.ResetFixed(ctx, "key") }, func(s *MemoryStore) int { return len(s.entries) }},
-		{"ResetSliding", func(s *MemoryStore) error { return s.ResetSliding(ctx, "key") }, func(s *MemoryStore) int { return len(s.sliding) }},
-		{"ResetTokens", func(s *MemoryStore) error { return s.ResetTokens(ctx, "key") }, func(s *MemoryStore) int { return len(s.tokens) }},
-		{"ResetTAT", func(s *MemoryStore) error { return s.ResetTAT(ctx, "key") }, func(s *MemoryStore) int { return len(s.gcra) }},
+		{"ResetFixed", func(s *MemoryStore) error { return s.ResetFixed(ctx, "key", window) }, func(s *MemoryStore) int { return len(s.entries) }},
+		{"ResetSliding", func(s *MemoryStore) error { return s.ResetSliding(ctx, "key", window) }, func(s *MemoryStore) int { return len(s.sliding) }},
+		{"ResetTokens", func(s *MemoryStore) error { return s.ResetTokens(ctx, "key", 10, window) }, func(s *MemoryStore) int { return len(s.tokens) }},
+		{"ResetTAT", func(s *MemoryStore) error { return s.ResetTAT(ctx, "key", 10, window) }, func(s *MemoryStore) int { return len(s.gcra) }},
 	}
 
 	for _, tc := range cases {
@@ -667,7 +667,7 @@ func TestMemoryStore_Expiry_ResetCleansHeap(t *testing.T) {
 		t.Fatalf("heap len = %d, want 1", store.eh.Len())
 	}
 
-	store.ResetFixed(ctx, "k")
+	store.ResetFixed(ctx, "k", window)
 	if store.eh.Len() != 0 {
 		t.Errorf("heap len after reset = %d, want 0", store.eh.Len())
 	}
@@ -695,10 +695,10 @@ func TestMemoryStore_Expiry_OnlyExpiredRemoved(t *testing.T) {
 	if len(store.entries) != 1 {
 		t.Errorf("entries map len = %d, want 1", len(store.entries))
 	}
-	if _, ok := store.entries["long"]; !ok {
+	if _, ok := store.entries[stateKey{key: "long", window: longWindow}]; !ok {
 		t.Error("long-window key should survive")
 	}
-	if _, ok := store.entries["short"]; ok {
+	if _, ok := store.entries[stateKey{key: "short", window: shortWindow}]; ok {
 		t.Error("short-window key should be expired")
 	}
 }
@@ -735,7 +735,7 @@ func TestMemoryStore_CallsRemoveExpiredKeys(t *testing.T) {
 
 			left := 0
 			for i := 0; i < 10; i++ {
-				if _, ok := store.entries["old"+strconv.Itoa(i)]; ok {
+				if _, ok := store.entries[stateKey{key: "old" + strconv.Itoa(i), window: window}]; ok {
 					left++
 				}
 			}
