@@ -1,6 +1,6 @@
 module github.com/mj3smile/go-ratelimit/redisstore
 
-go 1.25.1
+go 1.26.0
 
 require (
 	github.com/mj3smile/go-ratelimit v0.0.0
