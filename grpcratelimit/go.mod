@@ -3,7 +3,7 @@ module github.com/mj3smile/go-ratelimit/grpcratelimit
 go 1.26.0
 
 require (
-	github.com/mj3smile/go-ratelimit v0.0.0
+	github.com/mj3smile/go-ratelimit v0.1.0
 	google.golang.org/grpc v1.85.0
 )
 

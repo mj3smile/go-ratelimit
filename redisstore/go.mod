@@ -3,7 +3,7 @@ module github.com/mj3smile/go-ratelimit/redisstore
 go 1.26.0
 
 require (
-	github.com/mj3smile/go-ratelimit v0.0.0
+	github.com/mj3smile/go-ratelimit v0.1.0
 	github.com/redis/go-redis/v9 v9.9.0
 )
 
